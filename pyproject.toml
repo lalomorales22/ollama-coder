@@ -26,7 +26,6 @@ Repository = "https://github.com/lalomorales22/ollama-code"
 Issues = "https://github.com/lalomorales22/ollama-code/issues"
 
 [project.scripts]
-ollama-code = "ollama_code.cli:main"
 ollama-coder = "ollama_code.cli:main"
 
 [tool.setuptools]

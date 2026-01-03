@@ -1294,13 +1294,9 @@ class CLI:
         print(r"     ╚═════╝ ╚═════╝ ╚═════╝ ╚══════╝╚═╝  ╚═╝")
         print(r"       //      //      //      //     //     ")
         print()
-        print("╔═══════════════════════════════════════════════════════════════╗")
-        print("║                   OllamaCoder v1.0                            ║")
-        print("║            Agentic Coding Assistant for Ollama                ║")
-        print("╚═══════════════════════════════════════════════════════════════╝")
         print()
         box_width = 63
-        title = f"OllamaCode v{__version__}"
+        title = f"OllamaCoder v{__version__}"
         subtitle = "Agentic Coding Assistant for Ollama"
         print("╔" + ("═" * box_width) + "╗")
         print("║" + title.center(box_width) + "║")
@@ -1444,12 +1440,12 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  ollama-code                           # Start interactive mode
-  ollama-code --auto                    # Start with auto mode enabled
-  ollama-code -p "fix the bug in app.py"  # Headless mode
-  ollama-code -p "refactor this code" --auto  # Headless + auto mode
-  ollama-code --model glm-4.7:cloud         # Use specific model
-  ollama-code --dir /path/to/project    # Work in specific directory
+  ollama-coder                           # Start interactive mode
+  ollama-coder --auto                    # Start with auto mode enabled
+  ollama-coder -p "fix the bug in app.py"  # Headless mode
+  ollama-coder -p "refactor this code" --auto  # Headless + auto mode
+  ollama-coder --model glm-4.7:cloud         # Use specific model
+  ollama-coder --dir /path/to/project    # Work in specific directory
         """
     )
     

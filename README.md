@@ -20,16 +20,11 @@ pip install -e .
 ## Run
 
 ```bash
-ollama-code
+ollama-coder
 ```
 
 You will be prompted to choose a model on startup. The selected model can be saved as your default.
 
-You can also run:
-
-```bash
-ollama-coder
-```
 
 ## Common Commands
 
