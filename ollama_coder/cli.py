@@ -213,7 +213,7 @@ class Config:
             "model": None,
             "ollama": {
                 "host": "",
-                "timeout_sec": 60,
+                "timeout_sec": 300,  # 5 minutes for slow local models
                 "headers": {},
                 "api_key": ""
             },
@@ -1692,7 +1692,7 @@ class CLI:
     def _build_ollama_client(self) -> ollama.Client:
         ollama_cfg = self.config.get("ollama", {})
         host = (ollama_cfg.get("host") or "").strip() or os.environ.get("OLLAMA_HOST")
-        timeout_sec = ollama_cfg.get("timeout_sec")
+        timeout_sec = ollama_cfg.get("timeout_sec", 300)  # Default 5 minutes
         headers = dict(ollama_cfg.get("headers") or {})
         api_key = (ollama_cfg.get("api_key") or "").strip()
         if api_key and "Authorization" not in headers:
@@ -1701,7 +1701,11 @@ class CLI:
         kwargs: Dict[str, Any] = {}
         if host:
             kwargs["host"] = host
-        if timeout_sec:
+        # Always set timeout - use httpx.Timeout for proper configuration
+        try:
+            import httpx
+            kwargs["timeout"] = httpx.Timeout(timeout_sec, connect=30.0)
+        except ImportError:
             kwargs["timeout"] = timeout_sec
         if headers:
             kwargs["headers"] = headers
