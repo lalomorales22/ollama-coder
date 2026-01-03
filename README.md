@@ -75,10 +75,3 @@ Repository: https://github.com/lalomorales22/ollama-code
 ## License
 
 MIT
-
-## Publish to PyPI
-
-```bash
-python -m build
-python -m twine upload dist/*
-```
