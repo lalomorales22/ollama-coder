@@ -1,0 +1,32 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ollama-code"
+version = "0.1.0"
+description = "Agentic coding assistant for Ollama"
+readme = "README.md"
+requires-python = ">=3.9"
+dependencies = ["ollama>=0.4.0"]
+license = {text = "MIT"}
+authors = [{name = "Lalo Morales"}]
+keywords = ["ollama", "cli", "agent", "coding-assistant"]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Environment :: Console",
+  "License :: OSI Approved :: MIT License",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3 :: Only"
+]
+
+[project.urls]
+Homepage = "https://github.com/lalomorales22/ollama-code"
+Repository = "https://github.com/lalomorales22/ollama-code"
+Issues = "https://github.com/lalomorales22/ollama-code/issues"
+
+[project.scripts]
+ollama-code = "ollama_code.cli:main"
+
+[tool.setuptools]
+packages = ["ollama_code"]

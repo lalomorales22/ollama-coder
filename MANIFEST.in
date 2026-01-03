@@ -1,0 +1,7 @@
+prune output
+prune .ollamacode
+include LICENSE
+exclude notes.txt
+exclude .DS_Store
+exclude **/.DS_Store
+global-exclude *.py[cod]
