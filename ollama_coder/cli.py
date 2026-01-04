@@ -365,8 +365,8 @@ class ModelRegistry:
                 return candidate
         return None
 
-    def list_model_names(self, refresh: bool = True) -> List[str]:
-        """Return model names only"""
+    def list_model_names(self, refresh: bool = True, include_cloud: bool = False) -> List[str]:
+        """Return model names only (excludes cloud models by default)"""
         names = []
         for model in self.list_models(refresh=refresh):
             name = None
@@ -375,6 +375,9 @@ class ModelRegistry:
             else:
                 name = getattr(model, "name", None) or getattr(model, "model", None)
             if name:
+                # Skip cloud models unless explicitly requested
+                if not include_cloud and name.endswith(":cloud"):
+                    continue
                 names.append(name)
         return names
 

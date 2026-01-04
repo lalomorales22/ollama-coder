@@ -188,6 +188,7 @@ This avoids the `--break-system-packages` issue with pip on macOS.
 
 | Version | Changes |
 |---------|---------|
+| 0.2.3 | Filter out cloud models (`:cloud` suffix) from model list |
 | 0.2.2 | Fix 401 unauthorized (filter empty headers) |
 | 0.2.1 | Fix timeout for slow models (60s → 300s) |
 | 0.2.0 | Streaming, vision, context management, ThinkTool, MultiEditTool |
@@ -197,7 +198,6 @@ This avoids the `--break-system-packages` issue with pip on macOS.
 
 ## 🏁 Next Steps
 
-1. Fix the Homebrew formula to avoid dylib relocation errors
-2. Test on the second machine
-3. Once working, commit the fix and push
-4. Update both READMEs with working Homebrew instructions
+1. ~~Fix the Homebrew formula to avoid dylib relocation errors~~ ✅ Fixed with post_install
+2. ~~Test on the second machine~~ ✅ Working
+3. Update Homebrew formula for 0.2.3
