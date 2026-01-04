@@ -13,32 +13,44 @@ OllamaCoder transforms your local Ollama models into a powerful autonomous codin
 - **💭 Think Tool**: Structured reasoning for complex problems (like extended thinking)
 - **📝 Multi-Edit**: Batch file edits in a single operation
 - **🔄 Autonomous Mode**: Let the AI work through complex tasks independently
+- **📡 Streaming Responses**: Real-time token streaming for better UX
+- **🖼️ Vision/Image Support**: Analyze images with multimodal models
+- **📊 Context Management**: Automatic conversation summarization to stay within context limits
 - **⚙️ Hierarchical Config**: User and project-level settings with OLLAMA.md context files
 - **🌐 Remote Ollama**: Connect to remote Ollama servers via OLLAMA_HOST
 - **💾 Persistent History**: Conversation history saved across sessions
 - **🎨 Rich Output**: Beautiful terminal output with syntax highlighting (optional)
 
-## 📦 Install
+## 📦 Installation
 
-From PyPI:
+### Via Homebrew (macOS) - Recommended
 
-\`\`\`bash
+```bash
+brew tap lalomorales22/ollama-coder
+brew install ollama-coder
+```
+
+### Via PyPI
+
+```bash
 pip install ollama-coder
-\`\`\`
+```
 
-For enhanced terminal output (recommended):
+For enhanced terminal output with streaming (recommended):
 
-\`\`\`bash
+```bash
+pip install ollama-coder[rich]
+# or
 pip install ollama-coder rich
-\`\`\`
+```
 
-For local development:
+### From Source
 
-\`\`\`bash
+```bash
 git clone https://github.com/lalomorales22/ollama-coder.git
 cd ollama-coder
 pip install -e .
-\`\`\`
+```
 
 ## 🚀 Quick Start
 
@@ -81,8 +93,9 @@ ollama-coder --dir /path/to/project
 | \`/auto\` | Toggle autonomous mode |
 | \`/model\` | Show or set the active model |
 | \`/models\` | List installed Ollama models |
-| \`/host\` | Show or set the Ollama host |
-| \`/config\` | Show current configuration |
+| \`/host\` | Show or set the Ollama host || `/streaming` | Toggle streaming responses |
+| `/image` | Attach image: `/image <path> <message>` |
+| `/context` | Show context usage stats || \`/config\` | Show current configuration |
 | \`/clear\` | Clear conversation history |
 | \`/help\` | Show available commands |
 | \`/quit\` | Exit OllamaCoder |
@@ -97,9 +110,19 @@ User config: \`~/.ollamacode/settings.json\`
   "max_iterations": 25,
   "max_tool_rounds": 8,
   "temperature": 0.7,
+  "streaming": true,
+  "vision": {
+    "enabled": true,
+    "max_image_size": 4194304
+  },
+  "context_management": {
+    "enabled": true,
+    "summarize_threshold": 0.75,
+    "keep_recent_messages": 10
+  },
   "ollama": {
     "host": "http://127.0.0.1:11434",
-    "timeout_sec": 60
+    "timeout_sec": 300
   },
   "web_search": {
     "enabled": false,
@@ -147,9 +170,11 @@ ollama-coder
 | Autonomous Mode | ✅ | ✅ |
 | Thinking Tool | ✅ | ✅ |
 | Multi-Edit | ✅ | ✅ |
+| Streaming | ✅ | ✅ |
+| Image Analysis | ✅ | ✅ |
+| Context Management | ✅ | ✅ |
 | Web Search | ✅ | ✅ |
 | Project Context | ✅ | ✅ |
-| Image Analysis | ❌ | ✅ |
 | MCP Support | 🔜 | ✅ |
 
 ## 📝 License
