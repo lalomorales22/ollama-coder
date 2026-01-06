@@ -1,0 +1,62 @@
+#!/bin/bash
+# Pre-commit hook for OllamaCoder
+# 
+# This hook runs OllamaCoder to review staged changes before commit.
+# Install by copying to .git/hooks/pre-commit and making executable.
+#
+# Exit codes:
+# 0 - Good to commit
+# 1 - Issues found (blocks commit)
+# 2 - Needs human review (blocks commit)
+
+set -e
+
+echo "🤖 Running OllamaCoder pre-commit review..."
+
+# Get list of staged files
+STAGED_FILES=$(git diff --cached --name-only --diff-filter=ACMR)
+
+if [ -z "$STAGED_FILES" ]; then
+    echo "No files staged, skipping review."
+    exit 0
+fi
+
+# Run OllamaCoder in headless mode with read-only
+ollama-coder --headless \
+    --no-write \
+    --max-tools 10 \
+    --timeout 120 \
+    --output json \
+    -p "Review these staged changes for issues:
+    
+$(git diff --cached)
+
+Check for:
+1. Obvious bugs
+2. Security issues
+3. Missing error handling
+
+If there are serious issues, say 'BLOCK_COMMIT: <reason>'.
+If changes look good, say 'APPROVE_COMMIT'.
+" > /tmp/ollamacode_review.json
+
+# Check the result
+EXIT_CODE=$?
+RESPONSE=$(cat /tmp/ollamacode_review.json)
+
+if echo "$RESPONSE" | grep -q "BLOCK_COMMIT"; then
+    echo "❌ Commit blocked by OllamaCoder review:"
+    echo "$RESPONSE" | jq -r '.response'
+    exit 1
+fi
+
+if [ $EXIT_CODE -eq 0 ]; then
+    echo "✅ Pre-commit review passed"
+    exit 0
+elif [ $EXIT_CODE -eq 2 ]; then
+    echo "⚠️ Review needs human attention"
+    exit 2
+else
+    echo "❌ Review failed"
+    exit 1
+fi

@@ -9,6 +9,7 @@ OllamaCoder transforms your local Ollama models into a powerful autonomous codin
 ## ✨ Features
 
 - **🤖 Agentic Architecture**: Autonomous multi-step task execution with planning, execution, and verification
+- **🛡️ Safety Hooks**: Blocks dangerous bash commands (rm -rf /, sudo, fork bombs, etc.)
 - **🔧 Full Tool System**: bash, file operations, git, code search, web search, and more
 - **💭 Think Tool**: Structured reasoning for complex problems (like extended thinking)
 - **📝 Multi-Edit**: Batch file edits in a single operation
@@ -18,7 +19,10 @@ OllamaCoder transforms your local Ollama models into a powerful autonomous codin
 - **📊 Context Management**: Automatic conversation summarization to stay within context limits
 - **⚙️ Hierarchical Config**: User and project-level settings with OLLAMA.md context files
 - **🌐 Remote Ollama**: Connect to remote Ollama servers via OLLAMA_HOST
-- **💾 Persistent History**: Conversation history saved across sessions
+- **💾 Session Persistence**: SQLite-backed session storage with full-text search
+- **🚀 Custom Commands**: Create your own slash commands in markdown
+- **🤖 Subagents**: Spawn specialized AI agents for focused tasks
+- **🎯 Skills**: Progressive expertise loading based on keywords
 - **🎨 Rich Output**: Beautiful terminal output with syntax highlighting (optional)
 
 ## 📦 Installation
@@ -65,11 +69,32 @@ ollama-coder --auto
 ollama-coder -p "fix the bug in app.py"
 
 # Use a specific model
-ollama-coder --model codellama:13b
+ollama-coder --model gpt-oss:20b
 
 # Work in a specific directory
 ollama-coder --dir /path/to/project
 \`\`\`
+
+## 🤖 Headless Mode (CI/CD)
+
+\`\`\`bash
+# Basic headless execution
+ollama-coder --headless -p "fix lint errors"
+
+# JSON output for parsing
+ollama-coder --headless --output json -p "analyze code"
+
+# Safety limits (read-only, max tools, timeout)
+ollama-coder --headless --no-write --max-tools 10 --timeout 120 -p "review"
+
+# Longer bash timeout for local AI (default: 300s)
+ollama-coder --bash-timeout 600 -p "create a react app"
+\`\`\`
+
+**Exit Codes:**
+- `0` - Success
+- `1` - Failure/Error
+- `2` - Needs human intervention
 
 ## 🛠️ Available Tools
 
@@ -83,6 +108,10 @@ ollama-coder --dir /path/to/project
 | \`multi_edit\` | Batch multiple edits in one operation |
 | \`list_directory\` | Explore project structure |
 | \`search_code\` | Search for patterns using grep/ripgrep |
+| \`glob\` | **NEW** Find files matching glob patterns |
+| \`grep\` | **NEW** Regex search with context lines |
+| \`fetch_url\` | **NEW** Fetch and parse web content |
+| \`screenshot\` | **NEW** Browser screenshots (requires playwright) |
 | \`git\` | Version control operations |
 | \`web_search\` | Search the web (when configured) |
 
@@ -90,15 +119,26 @@ ollama-coder --dir /path/to/project
 
 | Command | Description |
 |---------|-------------|
-| \`/auto\` | Toggle autonomous mode |
-| \`/model\` | Show or set the active model |
-| \`/models\` | List installed Ollama models |
-| \`/host\` | Show or set the Ollama host || `/streaming` | Toggle streaming responses |
+| `/auto` | Toggle autonomous mode |
+| `/sessions` | List recent sessions |
+| `/resume` | Resume session: `/resume [id]` |
+| `/search` | Search sessions: `/search <query>` |
+| `/session` | Session info/actions: `/session title|export|archive` |
+| `/branch` | Branch current session |
+| `/new` | Start new session |
+| `/commands` | List custom commands |
+| `/subagents` | List available subagents |
+| `/skills` | List and manage skills |
+| `/model` | Show or set the active model |
+| `/models` | List installed Ollama models |
+| `/streaming` | Toggle streaming responses |
 | `/image` | Attach image: `/image <path> <message>` |
-| `/context` | Show context usage stats || \`/config\` | Show current configuration |
-| \`/clear\` | Clear conversation history |
-| \`/help\` | Show available commands |
-| \`/quit\` | Exit OllamaCoder |
+| `/context` | Show context usage stats |
+| `/config` | Show current configuration |
+| `/clear` | Clear conversation history |
+| `/help` | Show available commands |
+| `/quit` | Exit OllamaCoder |
+
 
 ## ⚙️ Configuration
 
@@ -106,11 +146,15 @@ User config: \`~/.ollamacode/settings.json\`
 
 \`\`\`json
 {
-  "model": "llama3.3:latest",
+  "model": "gpt-oss:20b-cloud",
   "max_iterations": 25,
   "max_tool_rounds": 8,
   "temperature": 0.7,
   "streaming": true,
+  "bash": {
+    "timeout_sec": 300,
+    "long_running_timeout_sec": 600
+  },
   "vision": {
     "enabled": true,
     "max_image_size": 4194304
@@ -175,6 +219,12 @@ ollama-coder
 | Context Management | ✅ | ✅ |
 | Web Search | ✅ | ✅ |
 | Project Context | ✅ | ✅ |
+| Session Persistence | ✅ | ✅ |
+| Safety Hooks | ✅ | ✅ |
+| Headless/CI Mode | ✅ | ✅ |
+| Subagents | ✅ | ✅ |
+| Custom Commands | ✅ | ✅ |
+| Skills System | ✅ | ✅ |
 | MCP Support | 🔜 | ✅ |
 
 ## 📝 License
@@ -191,10 +241,15 @@ MIT
 
 Version bumping and publishing is automated via GitHub Actions. Just:
 
-1. Bump version in \`pyproject.toml\` and \`ollama_coder/__init__.py\`
+1. Bump version in `pyproject.toml` and `ollama_coder/__init__.py`
 2. Commit and push
 3. Create and push a tag:
-   \`\`\`bash
-   git tag v0.1.3
-   git push origin v0.1.3
-   \`\`\`
+   ```bash
+   git tag v0.2.7
+   git push origin v0.2.7
+   ```
+
+---
+
+**Current Version**: 0.2.7
+

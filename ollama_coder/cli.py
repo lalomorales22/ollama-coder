@@ -49,6 +49,48 @@ except ImportError:
         __version__ = "0.0.0"
 
 try:
+    from ollama_coder.session import SessionManager
+except ImportError:
+    try:
+        from .session import SessionManager
+    except ImportError:
+        SessionManager = None
+
+try:
+    from ollama_coder.hooks import HookManager
+except ImportError:
+    try:
+        from .hooks import HookManager
+    except ImportError:
+        HookManager = None
+
+try:
+    from ollama_coder.commands import CommandManager
+except ImportError:
+    try:
+        from .commands import CommandManager
+    except ImportError:
+        CommandManager = None
+
+try:
+    from ollama_coder.subagent import SubagentManager, SubagentExecutor
+except ImportError:
+    try:
+        from .subagent import SubagentManager, SubagentExecutor
+    except ImportError:
+        SubagentManager = None
+        SubagentExecutor = None
+
+try:
+    from ollama_coder.skills import SkillManager, progressive_load
+except ImportError:
+    try:
+        from .skills import SkillManager, progressive_load
+    except ImportError:
+        SkillManager = None
+        progressive_load = None
+
+try:
     import ollama
 except ImportError:
     print("Error: ollama package not found. Install with: pip install ollama")
@@ -216,6 +258,10 @@ class Config:
                 "timeout_sec": 600,  # 10 minutes for slow local models
                 "headers": {},
                 "api_key": ""
+            },
+            "bash": {
+                "timeout_sec": 300,  # 5 minutes default (was 30s hardcoded)
+                "long_running_timeout_sec": 600,  # 10 min for installs/builds
             },
             "max_tokens": 4096,
             "temperature": 0.7,
@@ -456,9 +502,13 @@ class BashTool(Tool):
     name = "bash"
     description = "Execute bash commands in the terminal"
     
-    def __init__(self, working_dir: Path):
+    def __init__(self, working_dir: Path, config: Optional["Config"] = None):
         self.working_dir = working_dir
         self.session_env = os.environ.copy()
+        self.config = config
+        # Get timeout from config or use sensible default (5 min)
+        bash_cfg = config.get("bash", {}) if config else {}
+        self.timeout = bash_cfg.get("timeout_sec", 300)
     
     def get_schema(self) -> Dict[str, Any]:
         return {
@@ -472,6 +522,10 @@ class BashTool(Tool):
                         "command": {
                             "type": "string",
                             "description": "The bash command to execute"
+                        },
+                        "timeout": {
+                            "type": "integer",
+                            "description": "Optional timeout in seconds (default: from config)"
                         }
                     },
                     "required": ["command"]
@@ -479,8 +533,9 @@ class BashTool(Tool):
             }
         }
     
-    def execute(self, command: str) -> ToolResult:
+    def execute(self, command: str, timeout: Optional[int] = None) -> ToolResult:
         """Execute a bash command"""
+        cmd_timeout = timeout or self.timeout
         try:
             result = subprocess.run(
                 command,
@@ -489,7 +544,7 @@ class BashTool(Tool):
                 env=self.session_env,
                 capture_output=True,
                 text=True,
-                timeout=30
+                timeout=cmd_timeout
             )
             
             output = result.stdout
@@ -502,7 +557,7 @@ class BashTool(Tool):
                 error=None if result.returncode == 0 else f"Exit code: {result.returncode}"
             )
         except subprocess.TimeoutExpired:
-            return ToolResult(False, "", "Command timed out after 30 seconds")
+            return ToolResult(False, "", f"Command timed out after {cmd_timeout} seconds")
         except Exception as e:
             return ToolResult(False, "", str(e))
 
@@ -1075,6 +1130,377 @@ class MultiEditTool(Tool):
         )
 
 
+class GlobTool(Tool):
+    """Find files matching glob patterns"""
+    name = "glob"
+    description = "Find files matching a glob pattern"
+    
+    def __init__(self, working_dir: Path):
+        self.working_dir = working_dir
+    
+    def get_schema(self) -> Dict[str, Any]:
+        return {
+            "type": "function",
+            "function": {
+                "name": "glob",
+                "description": "Find files matching a glob pattern. Examples: '*.py', '**/*.ts', 'src/**/*.{js,jsx}'",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "pattern": {
+                            "type": "string",
+                            "description": "Glob pattern to match files (e.g., '**/*.py' for all Python files)"
+                        },
+                        "include_hidden": {
+                            "type": "boolean",
+                            "description": "Include hidden files (starting with .)"
+                        }
+                    },
+                    "required": ["pattern"]
+                }
+            }
+        }
+    
+    def execute(self, pattern: str, include_hidden: bool = False) -> ToolResult:
+        """Find files matching glob pattern"""
+        try:
+            # Try using 'fd' if available (faster)
+            if shutil.which("fd"):
+                cmd = ["fd", "--type", "f"]
+                if include_hidden:
+                    cmd.append("--hidden")
+                # Convert glob to fd pattern
+                fd_pattern = pattern.replace("**/*", "").replace("**/", "").replace("*.", r"\.").replace("*", ".*")
+                if fd_pattern:
+                    cmd.extend(["--glob", pattern])
+                
+                result = subprocess.run(
+                    cmd,
+                    cwd=self.working_dir,
+                    capture_output=True,
+                    text=True,
+                    timeout=30
+                )
+                
+                if result.returncode == 0:
+                    files = result.stdout.strip().splitlines()
+                    if files:
+                        output = f"Found {len(files)} files:\n" + "\n".join(f"  {f}" for f in files[:100])
+                        if len(files) > 100:
+                            output += f"\n  ... and {len(files) - 100} more"
+                        return ToolResult(True, output)
+                    return ToolResult(True, "No files found matching pattern")
+            
+            # Fallback to Python glob
+            from pathlib import Path
+            matches = list(self.working_dir.glob(pattern))
+            
+            # Filter hidden files if requested
+            if not include_hidden:
+                matches = [m for m in matches if not any(p.startswith('.') for p in m.parts)]
+            
+            # Only files, not directories
+            matches = [m for m in matches if m.is_file()]
+            
+            if matches:
+                # Add file size info
+                file_info = []
+                for m in matches[:100]:
+                    try:
+                        size = m.stat().st_size
+                        size_str = f"{size:,} bytes" if size < 1024 else f"{size/1024:.1f} KB"
+                        rel_path = m.relative_to(self.working_dir)
+                        file_info.append(f"  {rel_path} ({size_str})")
+                    except Exception:
+                        file_info.append(f"  {m.relative_to(self.working_dir)}")
+                
+                output = f"Found {len(matches)} files:\n" + "\n".join(file_info)
+                if len(matches) > 100:
+                    output += f"\n  ... and {len(matches) - 100} more"
+                return ToolResult(True, output)
+            
+            return ToolResult(True, "No files found matching pattern")
+            
+        except Exception as e:
+            return ToolResult(False, "", str(e))
+
+
+class GrepTool(Tool):
+    """Enhanced pattern search with context lines"""
+    name = "grep"
+    description = "Search for regex patterns in files with context lines"
+    
+    def __init__(self, working_dir: Path):
+        self.working_dir = working_dir
+    
+    def get_schema(self) -> Dict[str, Any]:
+        return {
+            "type": "function",
+            "function": {
+                "name": "grep",
+                "description": "Search for a regex pattern in files, with optional context lines before/after matches",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "pattern": {
+                            "type": "string",
+                            "description": "Regex pattern to search for"
+                        },
+                        "file_pattern": {
+                            "type": "string",
+                            "description": "Glob pattern for files to search (e.g., '*.py', default: all files)"
+                        },
+                        "context": {
+                            "type": "integer",
+                            "description": "Number of context lines before and after match (default: 0)"
+                        },
+                        "case_insensitive": {
+                            "type": "boolean",
+                            "description": "Case-insensitive search"
+                        }
+                    },
+                    "required": ["pattern"]
+                }
+            }
+        }
+    
+    def execute(self, pattern: str, file_pattern: str = "*", 
+                context: int = 0, case_insensitive: bool = False) -> ToolResult:
+        """Search for regex pattern with context"""
+        try:
+            # Prefer ripgrep
+            if shutil.which("rg"):
+                cmd = ["rg", "--line-number", "--no-heading", "--color", "never"]
+                if context > 0:
+                    cmd.extend(["-C", str(context)])
+                if case_insensitive:
+                    cmd.append("-i")
+                if file_pattern and file_pattern != "*":
+                    cmd.extend(["-g", file_pattern])
+                cmd.extend(["--", pattern])
+            else:
+                # Fallback to grep
+                cmd = ["grep", "-rn", "-E"]  # Extended regex
+                if context > 0:
+                    cmd.extend(["-C", str(context)])
+                if case_insensitive:
+                    cmd.append("-i")
+                if file_pattern and file_pattern != "*":
+                    cmd.append(f"--include={file_pattern}")
+                cmd.extend(["--", pattern, "."])
+            
+            result = subprocess.run(
+                cmd,
+                cwd=self.working_dir,
+                capture_output=True,
+                text=True,
+                timeout=30
+            )
+            
+            if result.returncode == 0 and result.stdout.strip():
+                lines = result.stdout.strip().splitlines()
+                # Limit output
+                if len(lines) > 100:
+                    output = f"Found {len(lines)} matches (showing first 100):\n"
+                    output += "\n".join(lines[:100])
+                    output += f"\n... and {len(lines) - 100} more matches"
+                else:
+                    output = f"Found {len(lines)} matches:\n{result.stdout}"
+                return ToolResult(True, output)
+            elif result.returncode == 1:
+                return ToolResult(True, "No matches found")
+            else:
+                return ToolResult(False, "", result.stderr.strip() or f"Search failed (exit {result.returncode})")
+                
+        except subprocess.TimeoutExpired:
+            return ToolResult(False, "", "Search timed out after 30 seconds")
+        except Exception as e:
+            return ToolResult(False, "", str(e))
+
+
+class URLFetchTool(Tool):
+    """Fetch content from URLs"""
+    name = "fetch_url"
+    description = "Fetch content from a URL and convert to readable text"
+    
+    def __init__(self, config: Config):
+        self.config = config
+    
+    def get_schema(self) -> Dict[str, Any]:
+        return {
+            "type": "function",
+            "function": {
+                "name": "fetch_url",
+                "description": "Fetch content from a URL. Returns text/markdown for web pages.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "url": {
+                            "type": "string",
+                            "description": "URL to fetch"
+                        },
+                        "max_length": {
+                            "type": "integer",
+                            "description": "Maximum content length to return (default: 10000 chars)"
+                        }
+                    },
+                    "required": ["url"]
+                }
+            }
+        }
+    
+    def execute(self, url: str, max_length: int = 10000) -> ToolResult:
+        """Fetch URL content"""
+        try:
+            # Validate URL
+            if not url.startswith(('http://', 'https://')):
+                return ToolResult(False, "", "URL must start with http:// or https://")
+            
+            # Set timeout from config or default
+            timeout = self.config.get("url_fetch", {}).get("timeout_sec", 15)
+            
+            # Create request with user agent
+            headers = {
+                "User-Agent": "OllamaCoder/1.0 (Agentic Coding Assistant)"
+            }
+            request = urllib.request.Request(url, headers=headers)
+            
+            with urllib.request.urlopen(request, timeout=timeout) as response:
+                content_type = response.headers.get('Content-Type', '')
+                body = response.read().decode('utf-8', errors='replace')
+            
+            # Basic HTML to text conversion
+            if 'text/html' in content_type:
+                body = self._html_to_text(body)
+            
+            # Truncate if too long
+            if len(body) > max_length:
+                body = body[:max_length] + f"\n\n... (truncated, {len(body) - max_length} more chars)"
+            
+            return ToolResult(True, f"Content from {url}:\n\n{body}")
+            
+        except urllib.error.HTTPError as e:
+            return ToolResult(False, "", f"HTTP error {e.code}: {e.reason}")
+        except urllib.error.URLError as e:
+            return ToolResult(False, "", f"URL error: {e.reason}")
+        except Exception as e:
+            return ToolResult(False, "", str(e))
+    
+    def _html_to_text(self, html: str) -> str:
+        """Basic HTML to text conversion"""
+        import re
+        
+        # Remove script and style elements
+        html = re.sub(r'<script[^>]*>.*?</script>', '', html, flags=re.DOTALL | re.IGNORECASE)
+        html = re.sub(r'<style[^>]*>.*?</style>', '', html, flags=re.DOTALL | re.IGNORECASE)
+        
+        # Convert common elements
+        html = re.sub(r'<br\s*/?>', '\n', html, flags=re.IGNORECASE)
+        html = re.sub(r'</?p[^>]*>', '\n\n', html, flags=re.IGNORECASE)
+        html = re.sub(r'<h[1-6][^>]*>(.*?)</h[1-6]>', r'\n\n## \1\n\n', html, flags=re.IGNORECASE | re.DOTALL)
+        html = re.sub(r'<li[^>]*>(.*?)</li>', r'\n• \1', html, flags=re.IGNORECASE | re.DOTALL)
+        html = re.sub(r'<a[^>]*href=["\']([^"\']*)["\'][^>]*>(.*?)</a>', r'\2 (\1)', html, flags=re.IGNORECASE | re.DOTALL)
+        
+        # Remove remaining tags
+        html = re.sub(r'<[^>]+>', '', html)
+        
+        # Decode entities
+        html = html.replace('&nbsp;', ' ')
+        html = html.replace('&amp;', '&')
+        html = html.replace('&lt;', '<')
+        html = html.replace('&gt;', '>')
+        html = html.replace('&quot;', '"')
+        
+        # Clean up whitespace
+        html = re.sub(r'\n{3,}', '\n\n', html)
+        html = re.sub(r' {2,}', ' ', html)
+        
+        return html.strip()
+
+
+class ScreenshotTool(Tool):
+    """Take browser screenshots"""
+    name = "screenshot"
+    description = "Take a screenshot of a webpage"
+    
+    def __init__(self, config: Config):
+        self.config = config
+    
+    def get_schema(self) -> Dict[str, Any]:
+        return {
+            "type": "function",
+            "function": {
+                "name": "screenshot",
+                "description": "Take a screenshot of a webpage. Requires playwright to be installed.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "url": {
+                            "type": "string",
+                            "description": "URL of the webpage to screenshot"
+                        },
+                        "full_page": {
+                            "type": "boolean",
+                            "description": "Capture full scrollable page (default: false, viewport only)"
+                        },
+                        "output_path": {
+                            "type": "string",
+                            "description": "Optional path to save screenshot (returns base64 if not provided)"
+                        }
+                    },
+                    "required": ["url"]
+                }
+            }
+        }
+    
+    def execute(self, url: str, full_page: bool = False, 
+                output_path: Optional[str] = None) -> ToolResult:
+        """Take a screenshot of a webpage"""
+        try:
+            # Check if playwright is available
+            try:
+                from playwright.sync_api import sync_playwright
+            except ImportError:
+                return ToolResult(False, "", 
+                    "Playwright not installed. Install with: pip install playwright && playwright install chromium")
+            
+            # Validate URL
+            if not url.startswith(('http://', 'https://')):
+                return ToolResult(False, "", "URL must start with http:// or https://")
+            
+            with sync_playwright() as p:
+                browser = p.chromium.launch(headless=True)
+                page = browser.new_page()
+                
+                # Set viewport
+                page.set_viewport_size({"width": 1280, "height": 720})
+                
+                # Navigate with timeout
+                page.goto(url, timeout=30000)
+                
+                # Wait for page to stabilize
+                page.wait_for_load_state("networkidle", timeout=10000)
+                
+                if output_path:
+                    # Save to file
+                    page.screenshot(path=output_path, full_page=full_page)
+                    browser.close()
+                    return ToolResult(True, f"Screenshot saved to: {output_path}")
+                else:
+                    # Return base64
+                    screenshot_bytes = page.screenshot(full_page=full_page)
+                    browser.close()
+                    
+                    import base64
+                    b64_data = base64.b64encode(screenshot_bytes).decode('utf-8')
+                    
+                    return ToolResult(True, 
+                        f"Screenshot captured ({len(screenshot_bytes)} bytes). Base64 data:\n{b64_data[:200]}...")
+                    
+        except Exception as e:
+            return ToolResult(False, "", f"Screenshot failed: {str(e)}")
+
+
 # ============================================================================
 # Tool Manager
 # ============================================================================
@@ -1086,13 +1512,15 @@ class ToolManager:
         self.working_dir = working_dir
         self.config = config
         self.tools: Dict[str, Tool] = {}
+        # Initialize hook manager for pre/post tool hooks
+        self.hook_manager = HookManager(working_dir) if HookManager else None
         self._register_tools()
     
     def _register_tools(self):
         """Register all available tools"""
         self.tools = {
             "think": ThinkTool(),
-            "bash": BashTool(self.working_dir),
+            "bash": BashTool(self.working_dir, self.config),
             "read_file": ReadFileTool(self.working_dir),
             "write_file": WriteFileTool(self.working_dir),
             "edit_file": EditFileTool(self.working_dir),
@@ -1101,6 +1529,11 @@ class ToolManager:
             "search_code": SearchCodeTool(self.working_dir),
             "git": GitTool(self.working_dir),
             "web_search": WebSearchTool(self.config),
+            # New Phase 1 tools
+            "glob": GlobTool(self.working_dir),
+            "grep": GrepTool(self.working_dir),
+            "fetch_url": URLFetchTool(self.config),
+            "screenshot": ScreenshotTool(self.config),
         }
     
     def get_tool_schemas(self) -> List[Dict[str, Any]]:
@@ -1116,7 +1549,24 @@ class ToolManager:
         if not self._check_permission(tool_name):
             return ToolResult(False, "", f"Permission denied for tool: {tool_name}")
         
-        return self.tools[tool_name].execute(**kwargs)
+        # Run pre-hook (safety checks, etc.)
+        if self.hook_manager:
+            event = f"pre_{tool_name}"
+            context = {"tool": tool_name, **kwargs}
+            allowed, message = self.hook_manager.run_pre_hook(event, context)
+            if not allowed:
+                return ToolResult(False, "", f"🛡️ Blocked by safety hook: {message}")
+        
+        # Execute the tool
+        result = self.tools[tool_name].execute(**kwargs)
+        
+        # Run post-hook (logging, verification, etc.)
+        if self.hook_manager:
+            post_event = f"post_{tool_name}"
+            post_context = {"tool": tool_name, "result": result, **kwargs}
+            self.hook_manager.run_post_hook(post_event, post_context)
+        
+        return result
     
     def _check_permission(self, tool_name: str) -> bool:
         """Check if tool execution is permitted"""
@@ -1142,10 +1592,12 @@ class ToolManager:
 class AgenticEngine:
     """The core agentic engine that orchestrates the autonomous loop"""
     
-    def __init__(self, config: Config, tool_manager: ToolManager, client: ollama.Client):
+    def __init__(self, config: Config, tool_manager: ToolManager, client: ollama.Client, 
+                 session_manager: Optional[Any] = None):
         self.config = config
         self.tool_manager = tool_manager
         self.client = client
+        self.session_manager = session_manager
         self.messages: List[Dict[str, Any]] = []
         self.iteration_count = 0
         self.max_iterations = config.get("max_iterations", 10)
@@ -1153,10 +1605,17 @@ class AgenticEngine:
         
         # Initialize with system context
         if config.context:
-            self.messages.append({
+            system_msg = {
                 "role": "system",
                 "content": self._build_system_prompt()
-            })
+            }
+            self.messages.append(system_msg)
+            # Save system message to session
+            if self.session_manager and self.session_manager.current_session_id:
+                self.session_manager.save_message(
+                    role="system", 
+                    content=system_msg["content"]
+                )
     
     def _build_system_prompt(self) -> str:
         """Build the system prompt with context and capabilities"""
@@ -1426,6 +1885,15 @@ When responding:
                     "tool_calls": tool_calls
                 })
                 
+                # Save to session
+                if self.session_manager and self.session_manager.current_session_id:
+                    self.session_manager.save_message(
+                        role="assistant",
+                        content=full_content,
+                        tool_calls=tool_calls,
+                        token_count=estimate_tokens(full_content)
+                    )
+                
                 # Execute tools and continue
                 self._execute_tool_calls(tool_calls, verbose=True)
                 
@@ -1438,6 +1906,14 @@ When responding:
                     "role": "assistant",
                     "content": full_content
                 })
+                
+                # Save to session
+                if self.session_manager and self.session_manager.current_session_id:
+                    self.session_manager.save_message(
+                        role="assistant",
+                        content=full_content,
+                        token_count=estimate_tokens(full_content)
+                    )
             
             return full_content
             
@@ -1603,6 +2079,14 @@ When responding:
             "content": user_message
         })
         
+        # Save to session
+        if self.session_manager and self.session_manager.current_session_id:
+            self.session_manager.save_message(
+                role="user",
+                content=user_message,
+                token_count=estimate_tokens(user_message)
+            )
+        
         if auto_mode:
             return self._auto_mode_loop()
         else:
@@ -1682,7 +2166,32 @@ class CLI:
         self.ollama_client = self._build_ollama_client()
         self.model_registry = ModelRegistry(self.config, self.ollama_client)
         self.tool_manager = ToolManager(project_dir, self.config)
-        self.engine = AgenticEngine(self.config, self.tool_manager, self.ollama_client)
+        
+        # Initialize session manager
+        self.session_manager = None
+        if SessionManager is not None:
+            self.session_manager = SessionManager()
+        
+        # Initialize command manager for custom slash commands
+        self.command_manager = None
+        if CommandManager is not None:
+            self.command_manager = CommandManager(project_dir)
+        
+        # Initialize subagent manager
+        self.subagent_manager = None
+        if SubagentManager is not None:
+            self.subagent_manager = SubagentManager(project_dir)
+        
+        # Initialize skill manager for progressive expertise
+        self.skill_manager = None
+        if SkillManager is not None:
+            self.skill_manager = SkillManager(project_dir)
+        
+        # Pass session manager to engine
+        self.engine = AgenticEngine(
+            self.config, self.tool_manager, self.ollama_client, 
+            session_manager=self.session_manager
+        )
         
         # Setup readline for better input
         histfile = self.config.user_config_dir / "history"
@@ -1909,9 +2418,18 @@ class CLI:
         print(f"🤖 Model: {self.config.get('model')}")
         print(f"⚙️  Auto mode: {'enabled' if auto_mode else 'disabled'}")
         print(f"📡 Streaming: {'enabled' if self.config.get('streaming', True) else 'disabled'}")
+        
+        # Create new session on startup
+        if self.session_manager:
+            session_id = self.session_manager.create_session(
+                project_path=str(self.project_dir),
+                model=self.config.get("model")
+            )
+            print(f"📝 Session: {session_id[:6]}")
+        
         print()
-        print("Commands: /auto /clear /context /streaming /image /model /models /host /help /quit")
-        print("Type /help for details")
+        print("Commands: /sessions /resume /auto /clear /context /model /help /quit")
+        print("Type /help for all commands")
         print()
         
         # If prompt provided, execute and exit (headless mode)
@@ -1925,7 +2443,12 @@ class CLI:
         try:
             while True:
                 try:
-                    user_input = input("You: ").strip()
+                    # Build prompt with session ID
+                    if self.session_manager and self.session_manager.current_session_id:
+                        prompt_text = f"[{self.session_manager.short_id}] You: "
+                    else:
+                        prompt_text = "You: "
+                    user_input = input(prompt_text).strip()
                     
                     if not user_input:
                         continue
@@ -1957,7 +2480,25 @@ class CLI:
                             print("  /model     - Show or set model")
                             print("  /models    - List installed models")
                             print("  /host      - Show or set Ollama host")
-                            print("  /help      - Show this help")
+                            print("\n  Session Commands:")
+                            print("  /sessions  - List recent sessions")
+                            print("  /resume    - Resume session: /resume [id]")
+                            print("  /search    - Search sessions: /search <query>")
+                            print("  /session   - Session actions: /session title|export|archive")
+                            print("  /branch    - Branch current session")
+                            print("  /new       - Start new session")
+                            print("\n  Extensibility:")
+                            print("  /commands  - List custom commands")
+                            print("  /subagents - List available subagents")
+                            print("  /skills    - List and manage skills")
+                            # Show custom commands if available
+                            if self.command_manager and self.command_manager.list_commands():
+                                print("\n  Custom Commands:")
+                                for cmd in self.command_manager.list_commands()[:5]:
+                                    print(f"  {cmd.name}: {cmd.description}")
+                                if len(self.command_manager.list_commands()) > 5:
+                                    print(f"  ... and {len(self.command_manager.list_commands()) - 5} more")
+                            print("\n  /help      - Show this help")
                             print("  /quit      - Exit\n")
                             continue
                         elif user_input == '/models':
@@ -2054,9 +2595,233 @@ class CLI:
                             else:
                                 print()
                             continue
+                        # ============================================================
+                        # Session Commands
+                        # ============================================================
+                        elif user_input == '/sessions':
+                            # List recent sessions
+                            if not self.session_manager:
+                                print("⚠️ Session manager not available")
+                                continue
+                            sessions = self.session_manager.list_sessions(limit=10)
+                            if not sessions:
+                                print("No sessions found. Start chatting to create one!")
+                                continue
+                            print("\n📋 Recent Sessions:")
+                            for i, s in enumerate(sessions, 1):
+                                title = s.get('title') or '(untitled)'
+                                sid = s.get('id', '')[:6]
+                                updated = s.get('updated_at', '')[:16]
+                                msg_count = s.get('message_count', 0)
+                                current = " ← current" if sid == self.session_manager.short_id else ""
+                                print(f"  [{i}] {sid} - {title} ({msg_count} msgs, {updated}){current}")
+                            print("\nUse /resume <id> or /resume <number> to resume")
+                            print()
+                            continue
+                        elif user_input.startswith('/resume'):
+                            # Resume a session
+                            if not self.session_manager:
+                                print("⚠️ Session manager not available")
+                                continue
+                            parts = user_input.split(maxsplit=1)
+                            if len(parts) == 1:
+                                # Resume most recent
+                                recent_id = self.session_manager.get_most_recent_session()
+                                if not recent_id:
+                                    print("No sessions to resume")
+                                    continue
+                                session_id = recent_id
+                            else:
+                                arg = parts[1].strip()
+                                # Check if it's a number (from /sessions list)
+                                if arg.isdigit():
+                                    sessions = self.session_manager.list_sessions(limit=10)
+                                    idx = int(arg) - 1
+                                    if 0 <= idx < len(sessions):
+                                        session_id = sessions[idx]['id']
+                                    else:
+                                        print(f"Invalid session number: {arg}")
+                                        continue
+                                else:
+                                    session_id = arg
+                            
+                            # Load the session
+                            info = self.session_manager.load_session(session_id)
+                            if not info:
+                                print(f"Session not found: {session_id}")
+                                continue
+                            
+                            # Load messages into engine
+                            messages = self.session_manager.load_messages(session_id)
+                            self.engine.messages = []
+                            for msg in messages:
+                                self.engine.messages.append({
+                                    "role": msg.get("role"),
+                                    "content": msg.get("content", "")
+                                })
+                            
+                            title = info.get('title') or session_id
+                            print(f"✅ Resumed session: {title}")
+                            print(f"   Messages: {len(messages)}, ID: {session_id[:6]}")
+                            if messages:
+                                last = messages[-1]
+                                preview = last.get('content', '')[:80]
+                                if len(last.get('content', '')) > 80:
+                                    preview += "..."
+                                print(f"   Last: [{last.get('role')}] {preview}")
+                            print()
+                            continue
+                        elif user_input.startswith('/search'):
+                            # Search sessions
+                            if not self.session_manager:
+                                print("⚠️ Session manager not available")
+                                continue
+                            parts = user_input.split(maxsplit=1)
+                            if len(parts) == 1:
+                                print("Usage: /search <query>")
+                                continue
+                            query = parts[1].strip()
+                            results = self.session_manager.search_sessions(query, limit=10)
+                            if not results:
+                                print(f"No results for: {query}")
+                                continue
+                            print(f"\n🔍 Search results for '{query}':")
+                            for r in results:
+                                sid = r.get('session_id', '')[:6]
+                                title = r.get('title') or '(untitled)'
+                                snippet = r.get('snippet', '')
+                                print(f"  [{sid}] {title}")
+                                print(f"       ...{snippet}...")
+                            print("\nUse /resume <id> to open a session")
+                            print()
+                            continue
+                        elif user_input.startswith('/session'):
+                            # Session management commands
+                            if not self.session_manager:
+                                print("⚠️ Session manager not available")
+                                continue
+                            parts = user_input.split(maxsplit=2)
+                            if len(parts) == 1:
+                                # Show current session info
+                                info = self.session_manager.get_session_info()
+                                if not info:
+                                    print("No active session")
+                                    continue
+                                print(f"\n📌 Current Session:")
+                                print(f"   ID: {info.get('id')}")
+                                print(f"   Title: {info.get('title') or '(untitled)'}")
+                                print(f"   Messages: {info.get('message_count', 0)}")
+                                print(f"   Created: {info.get('created_at', '')[:16]}")
+                                print(f"   Updated: {info.get('updated_at', '')[:16]}")
+                                print()
+                                continue
+                            action = parts[1].strip().lower()
+                            if action == 'title':
+                                if len(parts) < 3:
+                                    print("Usage: /session title <text>")
+                                    continue
+                                title = parts[2].strip()
+                                self.session_manager.update_title(
+                                    self.session_manager.current_session_id, title
+                                )
+                                print(f"✅ Title set to: {title}")
+                            elif action == 'export':
+                                try:
+                                    content = self.session_manager.export_session()
+                                    export_path = self.project_dir / f"session_{self.session_manager.short_id}.md"
+                                    with open(export_path, 'w') as f:
+                                        f.write(content)
+                                    print(f"✅ Exported to: {export_path}")
+                                except Exception as e:
+                                    print(f"❌ Export failed: {e}")
+                            elif action == 'archive':
+                                self.session_manager.update_status(
+                                    self.session_manager.current_session_id, 'archived'
+                                )
+                                print("✅ Session archived")
+                                # Create new session
+                                new_id = self.session_manager.create_session(
+                                    project_path=str(self.project_dir),
+                                    model=self.config.get("model")
+                                )
+                                print(f"📝 New session: {new_id[:6]}")
+                            else:
+                                print(f"Unknown session action: {action}")
+                                print("Available: title, export, archive")
+                            continue
+                        elif user_input == '/branch':
+                            # Branch current session
+                            if not self.session_manager:
+                                print("⚠️ Session manager not available")
+                                continue
+                            if not self.session_manager.current_session_id:
+                                print("No active session to branch")
+                                continue
+                            try:
+                                new_id = self.session_manager.branch_session()
+                                print(f"✅ Created branch: {new_id[:6]}")
+                                print("   You can now try a different approach.")
+                                print("   Original session is preserved.")
+                            except Exception as e:
+                                print(f"❌ Branch failed: {e}")
+                            continue
+                        elif user_input == '/new':
+                            # Start new session
+                            if not self.session_manager:
+                                print("⚠️ Session manager not available")
+                                continue
+                            new_id = self.session_manager.create_session(
+                                project_path=str(self.project_dir),
+                                model=self.config.get("model")
+                            )
+                            self.engine.clear_history()
+                            print(f"✅ Started new session: {new_id[:6]}")
+                            continue
+                        
+                        # Extensibility commands
+                        elif user_input == '/commands':
+                            if self.command_manager:
+                                print(self.command_manager.get_help_text())
+                            else:
+                                print("⚠️ Command manager not available")
+                            continue
+                        
+                        elif user_input == '/subagents':
+                            if self.subagent_manager:
+                                print(self.subagent_manager.get_help_text())
+                            else:
+                                print("⚠️ Subagent manager not available")
+                            continue
+                        
+                        elif user_input == '/skills':
+                            if self.skill_manager:
+                                print(self.skill_manager.get_help_text())
+                            else:
+                                print("⚠️ Skill manager not available")
+                            continue
+                        
+                        # Try custom commands
+                        elif self.command_manager and self.command_manager.get_command(user_input.split()[0]):
+                            cmd_name = user_input.split()[0]
+                            cmd_args = user_input[len(cmd_name):].strip()
+                            result = self.command_manager.execute_command(cmd_name, cmd_args)
+                            if "error" in result:
+                                print(f"❌ {result['error']}")
+                                continue
+                            # Execute the command prompt
+                            print(f"🚀 Running custom command: {result.get('description', cmd_name)}")
+                            print()
+                            response = self.engine.chat(result['prompt'], result.get('auto_mode', auto_mode))
+                            if not self.config.get("streaming", True):
+                                print(f"\nAssistant: {response}\n")
+                            else:
+                                print()
+                            continue
+                        
                         else:
                             print(f"Unknown command: {user_input}")
                             continue
+
                     
                     # Process message
                     print()
@@ -2073,6 +2838,91 @@ class CLI:
         finally:
             # Save history
             readline.write_history_file(self.histfile)
+    
+    def run_headless(
+        self,
+        prompt: str,
+        auto_mode: bool = False,
+        output_format: str = 'text',
+        max_tools: Optional[int] = None,
+        read_only: bool = False,
+        timeout: Optional[int] = None
+    ) -> int:
+        """
+        Run in headless mode for CI/CD automation.
+        
+        Returns exit codes:
+        - 0: Success
+        - 1: Failure/Error
+        - 2: Needs human intervention
+        """
+        import signal
+        import time
+        
+        start_time = time.time()
+        result = {
+            "success": False,
+            "response": "",
+            "error": None,
+            "tool_calls": 0,
+            "exit_code": 1
+        }
+        
+        # Timeout handler
+        def timeout_handler(signum, frame):
+            raise TimeoutError(f"Execution timed out after {timeout} seconds")
+        
+        try:
+            # Set up timeout if specified
+            if timeout:
+                signal.signal(signal.SIGALRM, timeout_handler)
+                signal.alarm(timeout)
+            
+            # Apply read-only mode
+            if read_only:
+                # Remove write tools from tool manager
+                write_tools = ['write_file', 'edit_file', 'multi_edit']
+                for tool_name in write_tools:
+                    if tool_name in self.tool_manager.tools:
+                        del self.tool_manager.tools[tool_name]
+            
+            # Apply max_tools limit
+            if max_tools is not None:
+                self.config.set('max_tool_rounds', max_tools)
+            
+            # Execute the prompt
+            response = self.engine.chat(prompt, auto_mode)
+            
+            # Cancel timeout
+            if timeout:
+                signal.alarm(0)
+            
+            result["success"] = True
+            result["response"] = response
+            result["exit_code"] = 0
+            result["duration"] = time.time() - start_time
+            
+        except TimeoutError as e:
+            result["error"] = str(e)
+            result["exit_code"] = 2  # Needs human - timed out
+        except KeyboardInterrupt:
+            result["error"] = "Interrupted by user"
+            result["exit_code"] = 2
+        except Exception as e:
+            result["error"] = str(e)
+            result["exit_code"] = 1
+        
+        # Output result
+        if output_format == 'json':
+            import json
+            print(json.dumps(result, indent=2))
+        else:
+            if result["success"]:
+                print(f"Response:\n{result['response']}")
+            else:
+                print(f"Error: {result['error']}")
+        
+        return result["exit_code"]
 
 
 # ============================================================================
@@ -2139,6 +2989,47 @@ Examples:
         default=None
     )
     
+    # Headless mode arguments
+    parser.add_argument(
+        '--headless',
+        help='Run in headless mode (no interactive prompts)',
+        action='store_true'
+    )
+    
+    parser.add_argument(
+        '--output',
+        help='Output format: text (default) or json',
+        choices=['text', 'json'],
+        default='text'
+    )
+    
+    parser.add_argument(
+        '--max-tools',
+        help='Maximum number of tool calls allowed (safety limit)',
+        type=int,
+        default=None
+    )
+    
+    parser.add_argument(
+        '--no-write',
+        help='Read-only mode: block write_file, edit_file, multi_edit',
+        action='store_true'
+    )
+    
+    parser.add_argument(
+        '--timeout',
+        help='Maximum execution time in seconds',
+        type=int,
+        default=None
+    )
+    
+    parser.add_argument(
+        '--bash-timeout',
+        help='Bash command timeout in seconds (default: 300)',
+        type=int,
+        default=None
+    )
+    
     args = parser.parse_args()
     
     # Validate project directory
@@ -2158,15 +3049,46 @@ Examples:
         cli.config.set('model', args.model)
     if args.max_iterations is not None:
         cli.config.set('max_iterations', args.max_iterations)
+    
+    # Apply headless safety settings
+    if args.max_tools is not None:
+        cli.config.set('max_tools', args.max_tools)
+    if args.no_write:
+        cli.config.set('read_only', True)
+    if args.timeout is not None:
+        cli.config.set('timeout', args.timeout)
+    if args.bash_timeout is not None:
+        # Update bash config with CLI override
+        bash_cfg = cli.config.get('bash', {})
+        bash_cfg['timeout_sec'] = args.bash_timeout
+        cli.config.set('bash', bash_cfg)
+        # Re-register tools to pick up new timeout
+        cli.tool_manager._register_tools()
 
     if args.choose_model:
         cli._choose_model(persist=True)
 
-    if args.prompt and not cli.ensure_model_available(interactive=False):
-        sys.exit(1)
+    # Headless mode with prompt
+    if args.prompt or args.headless:
+        if not cli.ensure_model_available(interactive=False):
+            if args.output == 'json':
+                import json
+                print(json.dumps({"success": False, "error": "No model available", "exit_code": 1}))
+            sys.exit(1)
+        
+        # Run in headless mode
+        exit_code = cli.run_headless(
+            prompt=args.prompt or "",
+            auto_mode=args.auto,
+            output_format=args.output,
+            max_tools=args.max_tools,
+            read_only=args.no_write,
+            timeout=args.timeout
+        )
+        sys.exit(exit_code)
     
-    # Run
-    cli.run(prompt=args.prompt, auto_mode=args.auto)
+    # Interactive mode
+    cli.run(prompt=None, auto_mode=args.auto)
 
 
 if __name__ == "__main__":
