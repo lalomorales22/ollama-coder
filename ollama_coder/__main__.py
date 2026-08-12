@@ -1,7 +1,8 @@
-"""OllamaCoder - Agentic coding assistant for Ollama."""
+"""python -m ollama_coder"""
 
-from ollama_coder.cli import main
+import sys
 
+from .cli import main
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

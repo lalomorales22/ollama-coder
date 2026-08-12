@@ -1,0 +1,40 @@
+name: Tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+        python: ["3.10", "3.12", "3.13"]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+          cache: pip
+
+      - name: Install
+        run: pip install -e ".[all,dev]"
+
+      # The suite uses a scripted fake backend, so no Ollama is needed.
+      - name: Test
+        run: pytest -q
+
+      - name: Lint
+        run: ruff check ollama_coder
+        continue-on-error: true
+
+      - name: Smoke-test the CLI
+        run: |
+          ollama-coder --version
+          ollama-coder --help > /dev/null

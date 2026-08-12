@@ -1,45 +1,34 @@
-# OllamaCoder Examples
+# Examples
 
-This directory contains example integrations for OllamaCoder.
+Integrations that use OllamaCoder's headless mode.
 
-## Git Hooks
+| | |
+|---|---|
+| [`git-hooks/pre-commit`](git-hooks/pre-commit) | reviews staged changes and blocks the commit on a real defect |
+| [`github-actions/ollamacode-review.yml`](github-actions/ollamacode-review.yml) | reviews pull requests with a model running on the runner |
 
-### Pre-commit Hook
-Reviews staged changes before commit.
+Both run with `--read-only`, which unregisters every mutating tool including
+`bash`, so the tree cannot change regardless of what the model decides to do.
+
+## Install the pre-commit hook
 
 ```bash
-# Install
-cp examples/git-hooks/pre-commit .git/hooks/
+cp examples/git-hooks/pre-commit .git/hooks/pre-commit
 chmod +x .git/hooks/pre-commit
 ```
 
-## GitHub Actions
+Bypass it for one commit with `SKIP_REVIEW=1 git commit`, and pick the model
+with `REVIEW_MODEL=qwen3:14b git commit`.
 
-### PR Code Review
-Automatically reviews pull requests.
+## Rolling your own
 
-```yaml
-# Copy to your repo
-cp examples/github-actions/ollamacode-review.yml .github/workflows/
-```
-
-## Headless Mode Usage
+The pieces that matter for scripting:
 
 ```bash
-# Basic headless execution
-ollama-coder --headless -p "fix lint errors"
-
-# JSON output for parsing
-ollama-coder --headless --output json -p "analyze this code"
-
-# Safety limits
-ollama-coder --headless --no-write --max-tools 10 -p "review changes"
-
-# With timeout
-ollama-coder --headless --timeout 120 -p "run tests"
+ollama-coder -p "<prompt>" --output json --read-only --timeout 300
 ```
 
-### Exit Codes
-- `0` - Success
-- `1` - Failure/Error
-- `2` - Needs human intervention (timeout, complex decision)
+* stdout is JSON: `{ok, response, error, tools, duration_ms, exit_code}`
+* stderr carries progress; `--quiet` silences it
+* exit `0` success · `1` error · `2` a human was needed (approval or timeout)
+* piped stdin is appended to the prompt as context

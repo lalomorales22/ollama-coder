@@ -1,88 +1,99 @@
-name: OllamaCoder Code Review
+# Review pull requests with a local model on the runner.
+#
+# Everything runs inside the job: Ollama is installed, a small model is pulled,
+# and the review never leaves GitHub's infrastructure. Copy to
+# .github/workflows/ in your own repository.
+
+name: OllamaCoder Review
 
 on:
   pull_request:
-    types: [opened, synchronize]
-  push:
-    branches: [main, develop]
+    types: [opened, synchronize, reopened]
+
+permissions:
+  contents: read
+  pull-requests: write
 
 jobs:
-  ollama-review:
+  review:
     runs-on: ubuntu-latest
-    
+    timeout-minutes: 25
+
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-      
-      - name: Setup Python
-        uses: actions/setup-python@v5
+
+      - uses: actions/setup-python@v5
         with:
-          python-version: '3.11'
-      
+          python-version: "3.12"
+
       - name: Install Ollama
         run: |
-          curl -fsSL https://ollama.ai/install.sh | sh
-          # Start Ollama server in background
-          ollama serve &
-          sleep 5
-      
-      - name: Pull model
-        run: ollama pull qwen3:1.7b  # Use smaller model for CI
-      
-      - name: Install OllamaCoder
-        run: pip install ollama-coder
-      
-      - name: Get changed files
-        id: changed
-        run: |
-          if [ "${{ github.event_name }}" == "pull_request" ]; then
-            echo "files=$(git diff --name-only origin/${{ github.base_ref }}...HEAD | tr '\n' ' ')" >> $GITHUB_OUTPUT
-          else
-            echo "files=$(git diff --name-only HEAD~1 | tr '\n' ' ')" >> $GITHUB_OUTPUT
-          fi
-      
-      - name: Run code review
+          curl -fsSL https://ollama.com/install.sh | sh
+          nohup ollama serve > /tmp/ollama.log 2>&1 &
+          for _ in $(seq 1 30); do
+            curl -sf http://localhost:11434/api/version && break
+            sleep 1
+          done
+
+      # Cache the model blobs; pulling 5GB on every PR is slow and rude.
+      - name: Cache models
+        uses: actions/cache@v4
+        with:
+          path: ~/.ollama/models
+          key: ollama-${{ env.MODEL }}
         env:
-          CHANGED_FILES: ${{ steps.changed.outputs.files }}
+          MODEL: qwen3:8b
+
+      - name: Pull model
+        run: ollama pull qwen3:8b
+
+      - name: Install OllamaCoder
+        run: pip install "ollama-coder[all]"
+
+      - name: Review the diff
         run: |
-          ollama-coder --headless \
-            --model qwen3:1.7b \
-            --no-write \
-            --max-tools 20 \
-            --timeout 300 \
+          git diff origin/${{ github.base_ref }}...HEAD > /tmp/pr.diff
+          ollama-coder \
+            --model qwen3:8b \
+            --read-only \
+            --quiet \
+            --max-steps 25 \
+            --timeout 900 \
             --output json \
-            -p "Review these changed files for issues: $CHANGED_FILES
+            -p "Review this pull request. Read the surrounding code before
+          judging a change — the diff alone is not enough context.
 
-          Check for:
-          1. Bugs and logic errors
-          2. Security vulnerabilities
-          3. Code style issues
-          4. Missing tests
+          Report only defects: correctness bugs, security problems, resource
+          leaks, missing error handling on a path that can realistically fail.
+          For each one give the file, the line, what breaks, and the input or
+          state that triggers it. Rank by severity. Skip style and praise.
 
-          Format your response with clear sections for each issue found.
-          " > review_result.json
-      
-      - name: Post review comment
-        if: github.event_name == 'pull_request'
+          If you find nothing, reply with exactly: No issues found.
+
+          $(cat /tmp/pr.diff)" > review.json
+
+      - name: Comment on the PR
         uses: actions/github-script@v7
         with:
           script: |
             const fs = require('fs');
-            const result = JSON.parse(fs.readFileSync('review_result.json', 'utf8'));
-            
-            if (result.response) {
-              github.rest.issues.createComment({
-                issue_number: context.issue.number,
-                owner: context.repo.owner,
-                repo: context.repo.repo,
-                body: `## 🤖 OllamaCoder Review\n\n${result.response}`
-              });
+            const result = JSON.parse(fs.readFileSync('review.json', 'utf8'));
+            const body = result.response?.trim();
+            if (!body || body === 'No issues found.') {
+              core.info('nothing to report');
+              return;
             }
-      
-      - name: Upload review result
-        uses: actions/upload-artifact@v4
+            await github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: `### 🦙 OllamaCoder review\n\n${body}\n\n<sub>local model \`qwen3:8b\`, read-only</sub>`,
+            });
+
+      - uses: actions/upload-artifact@v4
+        if: always()
         with:
-          name: ollamacode-review
-          path: review_result.json
+          name: review
+          path: review.json

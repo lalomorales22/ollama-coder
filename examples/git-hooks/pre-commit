@@ -1,62 +1,59 @@
-#!/bin/bash
-# Pre-commit hook for OllamaCoder
-# 
-# This hook runs OllamaCoder to review staged changes before commit.
-# Install by copying to .git/hooks/pre-commit and making executable.
+#!/usr/bin/env bash
+# Review staged changes with OllamaCoder before every commit.
 #
-# Exit codes:
-# 0 - Good to commit
-# 1 - Issues found (blocks commit)
-# 2 - Needs human review (blocks commit)
+#   cp examples/git-hooks/pre-commit .git/hooks/pre-commit
+#   chmod +x .git/hooks/pre-commit
+#
+# Skip it for one commit with:  SKIP_REVIEW=1 git commit
+# Exit 0 = commit proceeds, 1 = blocked.
 
-set -e
+set -uo pipefail
 
-echo "🤖 Running OllamaCoder pre-commit review..."
+[ -n "${SKIP_REVIEW:-}" ] && exit 0
+command -v ollama-coder >/dev/null || exit 0
 
-# Get list of staged files
-STAGED_FILES=$(git diff --cached --name-only --diff-filter=ACMR)
+DIFF=$(git diff --cached --diff-filter=ACMR)
+[ -z "$DIFF" ] && exit 0
 
-if [ -z "$STAGED_FILES" ]; then
-    echo "No files staged, skipping review."
-    exit 0
-fi
+MODEL="${REVIEW_MODEL:-qwen3:8b}"
+RESULT=$(mktemp)
+trap 'rm -f "$RESULT"' EXIT
 
-# Run OllamaCoder in headless mode with read-only
-ollama-coder --headless \
-    --no-write \
-    --max-tools 10 \
-    --timeout 120 \
+echo "reviewing staged changes with $MODEL…"
+
+# --read-only means no tool can modify the tree, whatever the model decides.
+ollama-coder \
+    --model "$MODEL" \
+    --read-only \
+    --quiet \
+    --max-steps 12 \
+    --timeout 180 \
     --output json \
-    -p "Review these staged changes for issues:
-    
-$(git diff --cached)
+    -p "Review this staged diff. Report ONLY defects you are confident about:
+a real bug, a security problem, a secret being committed, or a debug
+statement left behind. Style opinions are not defects.
 
-Check for:
-1. Obvious bugs
-2. Security issues
-3. Missing error handling
+If you find one, start your reply with the exact token BLOCK.
+If the diff is fine, reply with exactly: OK
 
-If there are serious issues, say 'BLOCK_COMMIT: <reason>'.
-If changes look good, say 'APPROVE_COMMIT'.
-" > /tmp/ollamacode_review.json
+$DIFF" > "$RESULT"
 
-# Check the result
-EXIT_CODE=$?
-RESPONSE=$(cat /tmp/ollamacode_review.json)
+STATUS=$?
+RESPONSE=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("response",""))' "$RESULT" 2>/dev/null)
 
-if echo "$RESPONSE" | grep -q "BLOCK_COMMIT"; then
-    echo "❌ Commit blocked by OllamaCoder review:"
-    echo "$RESPONSE" | jq -r '.response'
-    exit 1
-fi
-
-if [ $EXIT_CODE -eq 0 ]; then
-    echo "✅ Pre-commit review passed"
+if [ $STATUS -eq 1 ]; then
+    echo "review could not run; committing anyway"
     exit 0
-elif [ $EXIT_CODE -eq 2 ]; then
-    echo "⚠️ Review needs human attention"
-    exit 2
-else
-    echo "❌ Review failed"
+fi
+
+if printf '%s' "$RESPONSE" | grep -q "BLOCK"; then
+    echo
+    echo "commit blocked by review:"
+    printf '%s\n' "$RESPONSE"
+    echo
+    echo "commit anyway with: SKIP_REVIEW=1 git commit"
     exit 1
 fi
+
+echo "review passed"
+exit 0
