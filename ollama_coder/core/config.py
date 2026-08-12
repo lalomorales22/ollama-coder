@@ -41,6 +41,10 @@ DEFAULTS: dict[str, Any] = {
         "headers": {},
         "api_key": "",
         "allow_cloud_models": False,
+        # 0 = auto: 64k when the daemon quantises the KV cache
+        # (OLLAMA_KV_CACHE_TYPE=q8_0), 32k otherwise. Raise only after
+        # checking `ollama ps` still reports 100% GPU.
+        "context_ceiling": 0,
     },
     # --- agent loop ----------------------------------------------------
     "max_steps": 40,

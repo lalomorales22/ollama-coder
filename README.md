@@ -111,16 +111,84 @@ ollama-coder --doctor
 
 ### Choosing a model
 
-The agent needs a model with **tool-calling support** — without it the model can't read or edit anything. `--models` marks which of yours qualify:
+Two things matter, in this order.
+
+**1. It must support tool calling.** Without it the model cannot read or edit
+anything — it can only talk. `--models` marks which of yours qualify:
 
 ```
 $ ollama-coder --models
-→ qwen3:8b          8.2B    32,768 ctx  tools+thinking
-  gemma3:12b       11.9B   131,072 ctx  tools+vision+thinking
-  codellama:13b    13.0B    16,384 ctx
+→ qwen3.6:latest    36.0B   262,144 ctx  tools+vision+thinking
+  gpt-oss:20b       20.9B   131,072 ctx  tools+thinking
+  gemma4:12b-it-qat 11.9B   262,144 ctx  tools+vision+thinking
+  codellama:13b     13.0B    16,384 ctx
 ```
 
-Good starting points: `qwen3:8b` (best quality/size trade-off), `gpt-oss:20b` (stronger reasoning), `qwen3:4b` (fast on a laptop). Below ~7B parameters, tool calling gets unreliable.
+**2. Prefer a Mixture-of-Experts model.** This matters more than parameter count
+on Apple Silicon, where memory bandwidth is the bottleneck. An MoE model only
+activates a fraction of its weights per token, so a *bigger* MoE routinely beats
+a smaller dense model. Measured on a 32GB M4 Mac mini, warm, at 32k context:
+
+| model | | tok/s |
+|---|---|---|
+| `qwen3.6` | 36B **MoE** (256 experts, 8 active), 23GB | **30.6** |
+| `Qwythos-9B-1M` | 9B dense, 6.8GB | 16.8 |
+| `gpt-oss:20b` | 20B **MoE**, 13GB | 14.0 |
+| `gemma4:12b-it-qat` | 12B dense, 7.2GB | 12.4 |
+
+The largest model on the list is also the fastest, by 2×.
+
+Rough guidance: **`qwen3.6`** or another 30B-class MoE if you have 32GB;
+**`gpt-oss:20b`** at 16GB, or when you want more room for context; `qwen3:4b`
+for a quick laptop. Below ~7B, tool calling gets unreliable enough to be
+frustrating.
+
+### Context size, and why bigger is not better
+
+Models advertise enormous windows — 262k, even 1M. Those numbers are not usable
+memory budgets. The KV cache grows linearly with context and lives in the same
+RAM as the weights, so the ceiling is set by your machine, not the model card.
+
+Measured on the same 32GB M4, footprint by context (`ollama ps`):
+
+| | 32k | 128k | 256k | 512k | 1M |
+|---|---|---|---|---|---|
+| 9B dense, default KV | 7.3 GB | 10 GB | *failed to load* | — | — |
+| 9B dense, **8-bit KV** | 6.8 GB | 7.9 GB | 10 GB | 15 GB | 26 GB ⚠️ |
+
+⚠️ = spilled to CPU. A "1M context" model on a 32GB machine is arithmetic that
+does not close: the cache alone wants ~28GB, and prompt processing at that
+length costs minutes per turn before a single token comes back.
+
+**Quantise the KV cache.** It roughly halves the cost for no measurable speed
+penalty, and it is the single highest-value setting on this hardware:
+
+```bash
+OLLAMA_FLASH_ATTENTION=1
+OLLAMA_KV_CACHE_TYPE=q8_0
+```
+
+Export those where your Ollama **server** can see them, then restart it. On
+macOS the server is launched by the GUI and will not read your shell profile —
+use `launchctl setenv OLLAMA_FLASH_ATTENTION 1` before relaunching `Ollama.app`,
+or a small LaunchAgent to make it stick across reboots.
+
+With those set, `qwen3.6` went from spilling to CPU at 64k to sitting at 23GB
+**fully on the GPU**, at the same 30 tok/s.
+
+OllamaCoder requests 32k by default, or 64k when it can tell the cache is
+quantised. Set it explicitly with `ollama.context_ceiling`, and confirm with
+`ollama-coder --doctor`:
+
+```
+context      requesting 65,536 of 262,144 advertised
+```
+
+After raising it, check `ollama ps` still reports `100%` GPU. The moment it
+shows a CPU percentage you have crossed the cliff and everything gets slow.
+
+None of this limits how much work you can do in a session — the agent compacts
+the conversation automatically as it fills the window.
 
 ---
 

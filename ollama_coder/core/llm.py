@@ -13,6 +13,7 @@ Two things here matter more than they look:
 
 from __future__ import annotations
 
+import os
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
 from typing import Any
@@ -163,14 +164,28 @@ class OllamaBackend:
         return info
 
     async def effective_num_ctx(self, model: str) -> int:
-        """How large a context to actually request."""
+        """How large a context to actually request.
+
+        A model's advertised window is not the usable one: the KV cache grows
+        linearly with it and shares memory with the weights. Measured on a 32GB
+        M4, a 36B MoE at 64k sits at 23GB fully on the GPU with an 8-bit KV
+        cache, and spills to the CPU without one.
+
+        Whether the cache is quantised is the *daemon's* setting, not ours, and
+        there is no API to ask it -- on macOS the daemon is launched by the GUI
+        and does not share a terminal's environment. So `ollama.context_ceiling`
+        is authoritative; the env var is only consulted as a hint for the case
+        where client and server share an environment (Linux, manual `serve`).
+        """
         configured = self.config.get("num_ctx")
         if configured:
             return int(configured)
+        ceiling = int(self.config.get("ollama.context_ceiling", 0) or 0)
+        if not ceiling:
+            quantised = os.environ.get("OLLAMA_KV_CACHE_TYPE", "").lower() in ("q8_0", "q4_0")
+            ceiling = 65536 if quantised else 32768
         info = await self.info(model)
-        # Very large advertised windows are rarely usable on consumer hardware;
-        # 32k is a sane ceiling that still fits a substantial session.
-        return max(4096, min(info.context_length, 32768))
+        return max(4096, min(info.context_length, ceiling))
 
     # -- chat ------------------------------------------------------------
 

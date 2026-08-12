@@ -311,3 +311,48 @@ class TestRequirementParsing:
         assert deps["tomli"] == "2.0"
         assert "python_version" not in describe_dependencies(tmp_path)
         assert deps["httpx"] == "0.27", "extras must not confuse the version"
+
+
+class TestContextCeiling:
+    """The usable window is bounded by memory, not by the model card."""
+
+    def _backend(self, config, ceiling=None, num_ctx=None):
+        from ollama_coder.core.llm import OllamaBackend
+
+        if ceiling is not None:
+            config.set("ollama.context_ceiling", ceiling)
+        if num_ctx is not None:
+            config.set("num_ctx", num_ctx)
+        return OllamaBackend(config)
+
+    async def _ctx(self, backend, advertised: int) -> int:
+        from ollama_coder.core.llm import ModelInfo
+
+        async def fake_info(model: str) -> ModelInfo:
+            return ModelInfo(name=model, context_length=advertised)
+
+        backend.info = fake_info  # type: ignore[method-assign]
+        return await backend.effective_num_ctx("m")
+
+    @pytest.mark.asyncio
+    async def test_caps_a_1m_model_by_default(self, config, monkeypatch):
+        monkeypatch.delenv("OLLAMA_KV_CACHE_TYPE", raising=False)
+        assert await self._ctx(self._backend(config), 1_048_576) == 32768
+
+    @pytest.mark.asyncio
+    async def test_quantised_cache_raises_the_default(self, config, monkeypatch):
+        monkeypatch.setenv("OLLAMA_KV_CACHE_TYPE", "q8_0")
+        assert await self._ctx(self._backend(config), 1_048_576) == 65536
+
+    @pytest.mark.asyncio
+    async def test_explicit_ceiling_beats_env_detection(self, config, monkeypatch):
+        monkeypatch.setenv("OLLAMA_KV_CACHE_TYPE", "q8_0")
+        assert await self._ctx(self._backend(config, ceiling=16384), 1_048_576) == 16384
+
+    @pytest.mark.asyncio
+    async def test_never_exceeds_what_the_model_advertises(self, config):
+        assert await self._ctx(self._backend(config, ceiling=131072), 8192) == 8192
+
+    @pytest.mark.asyncio
+    async def test_explicit_num_ctx_wins_outright(self, config):
+        assert await self._ctx(self._backend(config, num_ctx=200_000), 1_048_576) == 200_000

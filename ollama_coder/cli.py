@@ -151,8 +151,12 @@ async def _doctor(config: Any) -> int:
         model = config.get("model") or (models[0] if models else None)
         if model:
             info = await backend.info(model)
-            print(f"model        {model} · {info.context_length:,} ctx · "
-                  f"{'+'.join(info.capabilities) or 'no capabilities reported'}")
+            effective = await backend.effective_num_ctx(model)
+            print(f"model        {model} · {'+'.join(info.capabilities) or 'no capabilities'}")
+            print(f"context      requesting {effective:,} of {info.context_length:,} advertised")
+            if effective < info.context_length:
+                print("             (raise with ollama.context_ceiling or --num-ctx; check")
+                print("              `ollama ps` still says 100% GPU afterwards)")
             if not info.supports_tools:
                 print("             ⚠ this model cannot call tools; pick another with --model")
                 ok = False

@@ -4,6 +4,12 @@
 
 ### Added
 
+- **Context ceiling is now adaptive and visible.** The advertised window is not
+  a usable memory budget -- the KV cache grows linearly with it and shares RAM
+  with the weights. OllamaCoder requests 32k by default, 64k when it can tell
+  the daemon quantises the cache, and `ollama.context_ceiling` overrides both.
+  `--doctor` now reports what is actually being requested.
+
 - **Dependency awareness.** The project is fingerprinted each session
   (`package.json` + `node_modules`, `pyproject.toml` + venv, `Cargo.toml`,
   `go.mod`) and the *installed* versions go into the system prompt. Fast-moving

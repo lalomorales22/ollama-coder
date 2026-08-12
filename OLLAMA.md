@@ -49,6 +49,16 @@ there rather than mocking `ollama` itself. TUI tests use Textual's
 
 Run the suite after every change. A change that has not been run is a guess.
 
+## Hardware notes (measured on a 32GB M4)
+
+- MoE beats dense on Apple Silicon: `qwen3.6` (36B MoE) runs 30 tok/s where a
+  12B dense model runs 12. Memory bandwidth is the bottleneck, and MoE
+  activates a fraction of its weights per token.
+- `OLLAMA_FLASH_ATTENTION=1` + `OLLAMA_KV_CACHE_TYPE=q8_0` roughly halve KV
+  cache memory for no speed cost. Without them, 36B MoE at 64k spills to CPU.
+- Watch `ollama ps`: anything less than `100%` GPU means it spilled and speed
+  has fallen off a cliff.
+
 ## Traps that have already bitten us
 
 - A Textual widget method named `_render` **overrides** `Widget._render()` and
