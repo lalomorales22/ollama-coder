@@ -19,7 +19,14 @@ import re
 from dataclasses import dataclass
 from pathlib import Path
 
-import tomllib
+# tomllib is stdlib from 3.11; tomli is the backport we depend on below that.
+try:
+    import tomllib
+except ModuleNotFoundError:  # pragma: no cover - Python 3.10
+    try:
+        import tomli as tomllib  # type: ignore[no-redef]
+    except ModuleNotFoundError:
+        tomllib = None  # type: ignore[assignment]
 
 MAX_DEPS = 28
 # Libraries whose public API churns enough that writing from memory is a bug.
@@ -79,10 +86,10 @@ def _python_dependencies(root: Path) -> list[Dependency]:
     declared: dict[str, str] = {}
 
     pyproject = root / "pyproject.toml"
-    if pyproject.is_file():
+    if pyproject.is_file() and tomllib is not None:
         try:
             data = tomllib.loads(pyproject.read_text(encoding="utf-8", errors="replace"))
-        except (OSError, tomllib.TOMLDecodeError, ValueError):
+        except Exception:
             data = {}
         for spec in data.get("project", {}).get("dependencies", []) or []:
             name, version = _split_requirement(str(spec))
@@ -145,11 +152,11 @@ def _split_requirement(spec: str) -> tuple[str, str]:
 
 def _rust_dependencies(root: Path) -> list[Dependency]:
     manifest = root / "Cargo.toml"
-    if not manifest.is_file():
+    if not manifest.is_file() or tomllib is None:
         return []
     try:
         data = tomllib.loads(manifest.read_text(encoding="utf-8", errors="replace"))
-    except (OSError, tomllib.TOMLDecodeError, ValueError):
+    except Exception:
         return []
     found = []
     for name, spec in (data.get("dependencies") or {}).items():
