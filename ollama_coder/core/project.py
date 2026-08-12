@@ -142,6 +142,8 @@ def _installed_python_versions(root: Path) -> dict[str, str]:
 
 
 def _split_requirement(spec: str) -> tuple[str, str]:
+    # drop any environment marker: 'tomli>=2.0; python_version < "3.11"'
+    spec = spec.split(";")[0]
     match = re.match(r"^\s*([A-Za-z0-9._-]+)\s*(?:\[[^\]]*\])?\s*(.*)$", spec)
     if not match:
         return "", ""

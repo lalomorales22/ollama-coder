@@ -297,3 +297,17 @@ class TestDuckDuckGo:
     def test_discards_results_without_a_usable_url(self):
         html = '<a class="result__a" href="javascript:void(0)">x</a><div class="result__snippet">y</a>'
         assert _parse_ddg(html, limit=5) == []
+
+
+class TestRequirementParsing:
+    def test_environment_markers_are_stripped(self, tmp_path: Path):
+        """'tomli>=2.0; python_version < "3.11"' must not leak the marker
+        into the version string shown to the model."""
+        (tmp_path / "pyproject.toml").write_text(
+            '[project]\nname = "x"\n'
+            'dependencies = [\'tomli>=2.0; python_version < "3.11"\', "httpx[http2]>=0.27"]\n'
+        )
+        deps = {d.name: d.version for d in detect_dependencies(tmp_path)}
+        assert deps["tomli"] == "2.0"
+        assert "python_version" not in describe_dependencies(tmp_path)
+        assert deps["httpx"] == "0.27", "extras must not confuse the version"
