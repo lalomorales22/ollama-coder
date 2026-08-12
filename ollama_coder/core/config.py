@@ -123,6 +123,11 @@ DEFAULTS: dict[str, Any] = {
         "connect_timeout_sec": 30,
         "servers": {},
     },
+    "skills": {
+        # how many matching skills may be injected per turn; more than a couple
+        # swamps a small model's context
+        "max_active": 2,
+    },
     "subagents": {
         "enabled": True,
         "max_parallel": 3,

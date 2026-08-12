@@ -736,6 +736,9 @@ class OllamaCoderApp(App[None]):
         )
 
     async def _cmd_skills(self, args: str) -> None:
+        if args.strip().split()[:1] == ["import"]:
+            await self._import_skills(args.strip()[len("import"):].split())
+            return
         self.skill_registry.reload()
         if not self.skill_registry.skills:
             self.transcript.notice(
@@ -748,6 +751,22 @@ class OllamaCoderApp(App[None]):
             active = "●" if name in self.skill_registry.active else "○"
             lines.append(f"{active} {name}: {skill.description} [{', '.join(skill.keywords[:4])}]")
         self.transcript.write_renderable(Text("\n".join(lines), style="#94a3b8"))
+
+    async def _import_skills(self, names: list[str]) -> None:
+        from ..core.extensions import import_claude_skills
+
+        imported, skipped = await asyncio.to_thread(
+            import_claude_skills, None, None, False, names or None
+        )
+        for name in imported:
+            self.transcript.notice(f"imported skill: {name}", "success")
+        for note in skipped:
+            self.transcript.notice(f"skipped: {note}", "info")
+        if not imported and not skipped:
+            self.transcript.notice(
+                "no Claude Code skills found under ~/.claude/skills or ~/.claude/plugins", "warn"
+            )
+        self.skill_registry.reload()
 
     async def _cmd_commands(self, args: str) -> None:
         self.command_registry.reload()

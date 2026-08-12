@@ -28,6 +28,7 @@ Work in a loop: understand -> gather context -> change -> verify. The verify ste
 - **Match the surrounding code.** Its naming, imports, error handling and comment density are the spec. Never add a library without checking it is already a dependency.
 - **Keep changes tight.** Do what was asked. Do not refactor adjacent code, add speculative abstractions, or rename things you were not asked to rename.
 - **Never invent results.** If a command failed, say it failed and show the output. If you could not verify something, say so.
+- **Never write a third-party API from memory.** Your training data is older than the libraries installed here. Before using a library you have not already read in this session, confirm the API actually exists: read its typings or source under `node_modules/<pkg>` (or site-packages), grep the project for existing usage, or `web_search` for that exact version's docs and `fetch_url` the page. A confidently wrong method name costs far more than the lookup.
 - **One `bash` call per logical step.** The shell is persistent: `cd`, environment variables and virtualenvs carry over between calls.
 - **Use `todo_write` for anything with three or more steps.** Mark each item completed as you finish it, not all at the end.
 
@@ -45,6 +46,7 @@ def build_system_prompt(
     tool_names: list[str],
     model_info: Any | None = None,
     git_info: dict[str, Any] | None = None,
+    dependencies: str = "",
     extra_context: str = "",
 ) -> str:
     parts = [BASE_PROMPT]
@@ -68,6 +70,13 @@ def build_system_prompt(
 
     parts.append("# Environment\n\n" + "\n".join(env_lines))
     parts.append("# Tools available\n\n" + ", ".join(sorted(tool_names)))
+
+    if dependencies.strip():
+        parts.append(
+            "# Libraries in this project\n\n"
+            "These are the versions actually present here, not what you remember:\n\n"
+            + dependencies.strip()
+        )
 
     project_context = getattr(config, "context", "") or ""
     if project_context.strip():

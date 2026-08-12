@@ -1,5 +1,34 @@
 # Changelog
 
+## 0.3.1
+
+### Added
+
+- **Dependency awareness.** The project is fingerprinted each session
+  (`package.json` + `node_modules`, `pyproject.toml` + venv, `Cargo.toml`,
+  `go.mod`) and the *installed* versions go into the system prompt. Fast-moving
+  libraries are flagged so the model checks the API instead of recalling it.
+- **Bundled `threejs` skill** — procedural rather than a list of API facts:
+  check the installed version, read the typings, search with the revision.
+- **`--import-skills`** (and `/skills import`) brings Claude Code skills across
+  from `~/.claude/skills` and `~/.claude/plugins`, deriving keywords from each
+  skill's name and description since Claude's format carries none.
+- Skills are now **ranked and capped** (`skills.max_active`, default 2) rather
+  than all-matching-at-once, which used to risk swamping a small context.
+- `web_search` gained a provider chain: DuckDuckGo free by default, Ollama's
+  hosted search when `OLLAMA_API_KEY` is set, or your own endpoint.
+
+### Fixed
+
+- **`web_search` returned unusable URLs.** Results came back as DuckDuckGo
+  redirect wrappers (`//duckduckgo.com/l/?uddg=...`) with no scheme, so
+  `fetch_url` rejected every one of them. They are now unwrapped to the real
+  destination, making search → read actually chain.
+- DuckDuckGo scraping now sends a browser user-agent, POSTs the query and falls
+  back to the `lite` endpoint, so the key-less path is reliable.
+- Skill parsing accepts Claude Code's format (frontmatter in `SKILL.md`, no
+  separate `skill.yaml`).
+
 ## 0.3.0
 
 A rewrite. The agent core is now async and event-driven, the front end is a

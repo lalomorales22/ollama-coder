@@ -10,6 +10,7 @@ Three kinds, all discovered from `~/.ollamacode/` (global) and
 
 from __future__ import annotations
 
+import json
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -221,11 +222,119 @@ class Skill:
     path: Path
 
 
+# Skill descriptions are written as "Use this when the user wants to create..."
+# so the obvious tokens are all boilerplate. Matching on them would inject the
+# skill into nearly every message.
+_STOPWORDS = {
+    "a", "an", "and", "the", "for", "with", "when", "this", "that", "use", "used",
+    "using", "uses", "your", "you", "are", "not", "any", "from", "into", "how",
+    "what", "should", "code", "file", "files", "user", "users", "help", "helps",
+    "guidance", "skill", "skills", "it", "its", "they", "them", "in", "on", "of",
+    "or", "to", "be", "is", "as", "at", "by", "new", "one", "can", "will", "make",
+    "makes", "making", "build", "building", "builds", "up", "asks", "asking",
+    "wants", "want", "needs", "need", "create", "creating", "creates", "add",
+    "adding", "adds", "write", "writing", "writes", "request", "requests", "task",
+    "tasks", "project", "projects", "work", "working", "also", "before", "after",
+    "about", "such", "their", "there", "which", "these", "those", "than", "then",
+    "have", "has", "get", "gets", "set", "run", "running", "example", "examples",
+    "including", "include", "includes", "specific", "existing", "own", "via",
+    "trigger", "triggers", "invoke", "invoked", "always", "never", "must", "may",
+}
+
+
+def derive_keywords(name: str, description: str) -> list[str]:
+    """Infer trigger words when a skill declares none.
+
+    Claude Code skills carry only `name` and `description`, so an imported one
+    has nothing to match on. Rather than take every word, prefer the signals
+    that actually identify a domain: the skill's own name, technical tokens
+    (dots, digits, ALL-CAPS acronyms) and proper nouns. Generic verbs from the
+    surrounding "use this when..." boilerplate are dropped.
+    """
+    slug = name.lower().strip()
+    keywords: list[str] = [slug] if slug else []
+
+    def add(token: str) -> None:
+        token = token.lower().strip(".,-")
+        if len(token) < 3 or token in _STOPWORDS or token.isdigit():
+            return
+        if token not in keywords:
+            keywords.append(token)
+
+    # the name, whole and in parts: "build-mcp-server" -> build, mcp, server
+    for part in re.split(r"[-_\s]+", slug):
+        add(part)
+
+    # technical-looking and capitalised tokens from the description carry the
+    # domain: "MCP", "Slack", "three.js", "pytest"
+    for token in re.findall(r"[A-Za-z][\w.+#-]{2,}", description):
+        bare = token.strip(".,-")
+        is_acronym = bare.isupper() and len(bare) <= 6
+        is_dotted = "." in bare or any(ch.isdigit() for ch in bare)
+        is_proper = bare[:1].isupper() and not bare.isupper()
+        if is_acronym or is_dotted or is_proper:
+            add(bare)
+
+    return keywords[:10]
+
+
+def parse_skill_dir(skill_dir: Path, source: str) -> Skill | None:
+    """Read a skill folder in either OllamaCoder's or Claude Code's format.
+
+    OllamaCoder: SKILL.md + skill.yaml (with explicit `keywords`).
+    Claude Code: SKILL.md with YAML frontmatter (`name`, `description`).
+    """
+    content = ""
+    for filename in ("SKILL.md", "skill.md"):
+        candidate = skill_dir / filename
+        if candidate.is_file():
+            content = _read(candidate)
+            break
+    if not content.strip():
+        return None
+
+    metadata: dict[str, Any] = {}
+    for filename in ("skill.yaml", "skill.yml"):
+        candidate = skill_dir / filename
+        if candidate.is_file():
+            metadata = _safe_yaml(_read(candidate))
+            break
+
+    # frontmatter inside SKILL.md (Claude's format) fills in anything missing
+    frontmatter = re.match(r"^---\s*\n(.*?)\n---\s*\n", content, re.DOTALL)
+    if frontmatter:
+        for key, value in _safe_yaml(frontmatter.group(1)).items():
+            metadata.setdefault(key, value)
+        content = content[frontmatter.end():].lstrip()
+
+    name = str(metadata.get("name") or skill_dir.name)
+    description = str(metadata.get("description", "")).strip()
+
+    raw_keywords = metadata.get("keywords")
+    if isinstance(raw_keywords, str):
+        raw_keywords = [k.strip() for k in raw_keywords.split(",")]
+    if raw_keywords:
+        keywords = [str(k).lower().strip() for k in raw_keywords if str(k).strip()]
+    else:
+        keywords = derive_keywords(name, description)
+
+    return Skill(
+        name=name,
+        description=description,
+        keywords=keywords,
+        content=content,
+        source=source,
+        path=skill_dir,
+    )
+
+
 class SkillRegistry:
     """Progressive disclosure: skill text enters the prompt only on a match."""
 
     def __init__(self, project_dir: Path):
         self.project_dir = Path(project_dir)
+        # skills shipped with the package; a user skill of the same name wins
+        self.bundled_dir = Path(__file__).resolve().parent.parent / "skills"
         self.global_dir = Path.home() / ".ollamacode" / "skills"
         self.local_dir = self.project_dir / ".ollamacode" / "skills"
         self.skills: dict[str, Skill] = {}
@@ -234,47 +343,43 @@ class SkillRegistry:
 
     def reload(self) -> None:
         self.skills = {}
-        for directory, source in ((self.global_dir, "global"), (self.local_dir, "project")):
+        sources = (
+            (self.bundled_dir, "bundled"),
+            (self.global_dir, "global"),
+            (self.local_dir, "project"),
+        )
+        for directory, source in sources:
             if not directory.is_dir():
                 continue
             for skill_dir in sorted(directory.iterdir()):
                 if not skill_dir.is_dir():
                     continue
-                content = ""
-                for filename in ("SKILL.md", "skill.md"):
-                    candidate = skill_dir / filename
-                    if candidate.exists():
-                        content = _read(candidate)
-                        break
-                if not content.strip():
-                    continue
-                metadata: dict[str, Any] = {}
-                for filename in ("skill.yaml", "skill.yml"):
-                    candidate = skill_dir / filename
-                    if candidate.exists():
-                        metadata = _safe_yaml(_read(candidate))
-                        break
-                name = str(metadata.get("name") or skill_dir.name)
-                self.skills[name] = Skill(
-                    name=name,
-                    description=str(metadata.get("description", "")),
-                    keywords=[str(k).lower() for k in (metadata.get("keywords") or [skill_dir.name])],
-                    content=content,
-                    source=source,
-                    path=skill_dir,
-                )
+                skill = parse_skill_dir(skill_dir, source)
+                if skill:
+                    self.skills[skill.name] = skill
 
     def match(self, text: str) -> list[Skill]:
-        lowered = text.lower()
-        found = []
-        for skill in self.skills.values():
-            if any(keyword and keyword in lowered for keyword in skill.keywords):
-                found.append(skill)
-        return found
+        """Matching skills, best first.
 
-    def activate_for(self, text: str) -> list[Skill]:
-        """Activate any newly-matched skills; returns only the new ones."""
-        newly = [s for s in self.match(text) if s.name not in self.active]
+        Ranked rather than merely filtered: "build an mcp server" hits five of
+        the imported Claude skills, and injecting all five would swamp a small
+        model's context. A longer matched keyword is a more specific signal, so
+        it scores higher.
+        """
+        lowered = text.lower()
+        scored: list[tuple[float, Skill]] = []
+        for skill in self.skills.values():
+            hits = [k for k in skill.keywords if k and k in lowered]
+            if not hits:
+                continue
+            score = len(hits) + max(len(k) for k in hits) / 10.0
+            scored.append((score, skill))
+        scored.sort(key=lambda pair: (-pair[0], pair[1].name))
+        return [skill for _, skill in scored]
+
+    def activate_for(self, text: str, limit: int = 2) -> list[Skill]:
+        """Activate the best newly-matched skills; returns only the new ones."""
+        newly = [s for s in self.match(text) if s.name not in self.active][:max(0, limit)]
         for skill in newly:
             self.active.add(skill.name)
         return newly
@@ -290,6 +395,92 @@ class SkillRegistry:
 
     def names(self) -> list[str]:
         return sorted(self.skills)
+
+
+# ---------------------------------------------------------------------------
+# Importing skills from Claude Code
+# ---------------------------------------------------------------------------
+
+def claude_skill_roots() -> list[Path]:
+    """Where Claude Code keeps skills. Resolved lazily so `Path.home()` can be
+    redirected (tests, or a non-standard HOME)."""
+    return [
+        Path.home() / ".claude" / "skills",
+        Path.home() / ".claude" / "plugins",
+    ]
+
+
+def discover_claude_skills(
+    extra_roots: list[Path] | None = None,
+    roots: list[Path] | None = None,
+) -> list[Path]:
+    """Find every SKILL.md under the usual Claude Code locations.
+
+    `roots` replaces the defaults outright; `extra_roots` adds to them.
+    """
+    roots = list(roots) if roots is not None else claude_skill_roots()
+    roots = roots + [Path(p) for p in (extra_roots or [])]
+    found: dict[str, Path] = {}
+    for root in roots:
+        if not root.is_dir():
+            continue
+        for skill_file in root.rglob("SKILL.md"):
+            skill_dir = skill_file.parent
+            # a later root wins, and duplicates across plugin caches collapse
+            found[skill_dir.name] = skill_dir
+    return sorted(found.values(), key=lambda p: p.name)
+
+
+def import_claude_skills(
+    target_dir: Path | None = None,
+    extra_roots: list[Path] | None = None,
+    overwrite: bool = False,
+    only: list[str] | None = None,
+    roots: list[Path] | None = None,
+) -> tuple[list[str], list[str]]:
+    """Copy Claude Code skills into OllamaCoder's skill directory.
+
+    Returns (imported, skipped). Each imported skill gains a `skill.yaml` with
+    derived keywords, since Claude's format has none and progressive loading
+    needs something to match on.
+    """
+    import shutil
+
+    destination = Path(target_dir or (Path.home() / ".ollamacode" / "skills"))
+    destination.mkdir(parents=True, exist_ok=True)
+
+    imported: list[str] = []
+    skipped: list[str] = []
+    wanted = {n.lower() for n in (only or [])}
+
+    for source_dir in discover_claude_skills(extra_roots, roots):
+        skill = parse_skill_dir(source_dir, "claude")
+        if skill is None:
+            continue
+        if wanted and skill.name.lower() not in wanted:
+            continue
+
+        target = destination / skill.name
+        if target.exists() and not overwrite:
+            skipped.append(f"{skill.name} (already imported)")
+            continue
+
+        try:
+            if target.exists():
+                shutil.rmtree(target)
+            shutil.copytree(source_dir, target, ignore=shutil.ignore_patterns(".git", "__pycache__"))
+            (target / "skill.yaml").write_text(
+                "# imported from " + str(source_dir) + "\n"
+                f"name: {skill.name}\n"
+                f"description: {json.dumps(skill.description)}\n"
+                "keywords:\n"
+                + "".join(f"  - {k}\n" for k in skill.keywords)
+            )
+            imported.append(skill.name)
+        except OSError as exc:
+            skipped.append(f"{skill.name} ({exc})")
+
+    return imported, skipped
 
 
 def _read(path: Path) -> str:

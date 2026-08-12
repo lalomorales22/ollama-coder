@@ -172,6 +172,70 @@ Exit codes: `0` success · `1` error · `2` needed a human (approval or timeout)
 
 ---
 
+## Keeping the model current
+
+A local model's training data is frozen. Ask it for three.js and it will happily
+write `THREE.Geometry`, deleted back in r125. Three mechanisms push against that,
+and they compose:
+
+**It is told what you actually have installed.** On every session the project is
+fingerprinted — `package.json` + `node_modules`, `pyproject.toml` + your venv,
+`Cargo.toml`, `go.mod` — and the *installed* versions go into the system prompt,
+not the declared ranges. `^0.160.0` says very little; `three 0.185.1` is a fact
+the model can act on. Libraries known to churn are called out explicitly, which
+turns "recall the API" into "go check the API".
+
+**It can search, with no API key.** `web_search` scrapes DuckDuckGo by default —
+free, nothing to sign up for — and `fetch_url` reads any result in full. Set
+`OLLAMA_API_KEY` and it upgrades to Ollama's hosted search automatically; set
+`web.search_endpoint` to use your own provider.
+
+**It checks the source first.** The bundled `threejs` skill teaches it to read
+`node_modules/three` and the bundled typings before writing anything, and to
+search with the revision in the query. That is deliberately procedural rather
+than a list of API facts — a hardcoded list would go stale the same way the
+model did.
+
+```
+❯ what version of three is here, and does THREE.Geometry still exist?
+  $ bash   cat node_modules/three/package.json | grep version
+  $ bash   grep -rn "class Geometry" node_modules/three/src/
+  three.js 0.185.1 (r185). THREE.Geometry does not exist — no match in the
+  installed source. It was removed in r125; everything is BufferGeometry.
+```
+
+### Skills
+
+Skills are folders whose content is injected **only when your message matches
+their keywords**, so expertise costs no context until it is relevant. At most
+two load per turn (`skills.max_active`), best match first.
+
+`threejs` ships built in. To bring over everything you have written for Claude
+Code:
+
+```bash
+ollama-coder --import-skills              # all of them
+ollama-coder --import-skills frontend-design math-olympiad
+```
+
+This reads `~/.claude/skills` and `~/.claude/plugins`, copies each skill into
+`~/.ollamacode/skills/`, and writes a `skill.yaml` with keywords inferred from
+the name and description — Claude's format has none, and progressive loading
+needs something to match on. Inferred keywords are a starting point: edit
+`<skill>/skill.yaml` to tune when it fires. Re-running never overwrites your
+edits. `/skills` lists what is loaded, `/skills import` does the same from
+inside the app.
+
+Writing one from scratch is just a folder:
+
+```
+~/.ollamacode/skills/our-api/
+  SKILL.md     # the expertise, injected verbatim on a match
+  skill.yaml   # name, description, keywords
+```
+
+---
+
 ## Permissions
 
 The agent asks before it changes anything. Reading, searching and inspecting git are free.
@@ -284,7 +348,7 @@ system_prompt: |
   issues you can point at with a file and line.
 ```
 
-**Skills** — `skills/<name>/SKILL.md` plus a `skill.yaml` of keywords. The content is injected only when a keyword matches what you asked, so expertise costs no context until it's relevant.
+**Skills** — see [Keeping the model current](#keeping-the-model-current) above; `--import-skills` brings over your Claude Code ones.
 
 ---
 

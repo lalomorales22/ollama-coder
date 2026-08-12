@@ -73,6 +73,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--doctor", action="store_true", help="check the environment and exit")
     parser.add_argument("--scaffold", action="store_true",
                         help="write example agent/command/skill files and exit")
+    parser.add_argument("--import-skills", nargs="*", metavar="NAME",
+                        help="import skills from Claude Code (all, or just the named ones)")
     parser.add_argument("-v", "--version", action="version", version=f"ollama-coder {__version__}")
     return parser
 
@@ -205,6 +207,22 @@ def main(argv: list[str] | None = None) -> int:
         return asyncio.run(_list_models(config))
     if args.doctor:
         return asyncio.run(_doctor(config))
+    if args.import_skills is not None:
+        from .core.extensions import import_claude_skills
+
+        imported, skipped = import_claude_skills(only=args.import_skills or None)
+        for name in imported:
+            print(f"imported  {name}")
+        for note in skipped:
+            print(f"skipped   {note}")
+        if imported:
+            print(f"\n{len(imported)} skill(s) now in ~/.ollamacode/skills/")
+            print("They load automatically when your message matches their keywords.")
+            print("Edit keywords in <skill>/skill.yaml to tune when that happens.")
+        elif not skipped:
+            print("No Claude Code skills found in ~/.claude/skills or ~/.claude/plugins")
+        return 0
+
     if args.scaffold:
         from .core.extensions import scaffold_examples
 

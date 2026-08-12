@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "ollama-coder"
-version = "0.3.0"
+version = "0.3.1"
 description = "An autonomous coding agent for local Ollama models — terminal UI, MCP, and a real permission model"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -66,7 +66,7 @@ packages = [
 ]
 
 [tool.setuptools.package-data]
-ollama_coder = ["tui/*.tcss"]
+ollama_coder = ["tui/*.tcss", "skills/*/SKILL.md", "skills/*/skill.yaml"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"

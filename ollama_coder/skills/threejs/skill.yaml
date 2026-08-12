@@ -1,0 +1,18 @@
+name: threejs
+description: Working with three.js / React Three Fiber against the installed version rather than a remembered one.
+keywords:
+  - three.js
+  - threejs
+  - three
+  - webgl
+  - webgpu
+  - r3f
+  - react-three-fiber
+  - "@react-three/fiber"
+  - drei
+  - buffergeometry
+  - orbitcontrols
+  - gltf
+  - shader
+  - mesh
+  - scene

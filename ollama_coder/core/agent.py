@@ -122,6 +122,7 @@ class Agent:
             content = self._system_prompt
         else:
             from ..tools.git import repo_summary
+            from .project import describe_dependencies
 
             model = self.config.get("model") or ""
             info = await self.backend.info(model) if model else None
@@ -131,6 +132,7 @@ class Agent:
                 tool_names=self._active_tool_names(),
                 model_info=info,
                 git_info=await repo_summary(self.workdir),
+                dependencies=await asyncio.to_thread(describe_dependencies, self.workdir),
             )
 
         message = {"role": "system", "content": content}
@@ -527,7 +529,8 @@ class Agent:
     async def _inject_skills(self, text: str) -> None:
         if not self.skills:
             return
-        matched = self.skills.activate_for(text)
+        limit = int(self.config.get('skills.max_active', 2))
+        matched = self.skills.activate_for(text, limit=limit)
         if not matched:
             return
         for skill in matched:

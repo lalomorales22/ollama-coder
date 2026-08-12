@@ -2,17 +2,25 @@
 
 from __future__ import annotations
 
+import asyncio
 import html as html_module
 import json
+import os
 import re
 from typing import Any
-from urllib.parse import urlencode, urlparse
+from urllib.parse import parse_qs, unquote, urlencode, urlparse
 
 import httpx
 
 from .base import Preview, Tool, ToolContext, ToolResult, truncate_output
 
 USER_AGENT = "OllamaCoder/0.3 (+https://github.com/lalomorales22/ollama-coder)"
+# DuckDuckGo serves a challenge page to obvious bots; a normal browser UA
+# is what keeps the free, key-less search path working.
+BROWSER_UA = (
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
+)
 
 # Blocked so a tool call cannot be turned into an SSRF probe of the local network.
 PRIVATE_HOSTS = re.compile(
@@ -132,9 +140,41 @@ class WebSearchTool(Tool):
         endpoint = str(ctx.config.get("web.search_endpoint") or "").strip()
         api_key = str(ctx.config.get("web.search_api_key") or "").strip()
 
+        # Provider chain: an explicit endpoint wins, then Ollama's hosted search
+        # if a key is present, then DuckDuckGo -- which needs no key at all, so
+        # search always works out of the box.
         if endpoint:
             return await self._custom_search(endpoint, api_key, query, limit, ctx)
+
+        provider = str(ctx.config.get("web.search_provider", "auto")).lower()
+        if provider in ("auto", "ollama") and os.environ.get("OLLAMA_API_KEY"):
+            result = await self._ollama_search(query, limit)
+            if result is not None:
+                return result
+            if provider == "ollama":
+                return ToolResult.fail("Ollama web search failed and no fallback was allowed")
+
         return await self._duckduckgo(query, limit, ctx)
+
+    async def _ollama_search(self, query: str, limit: int) -> ToolResult | None:
+        """ollama.com hosted search. Returns None so callers can fall back."""
+        try:
+            import ollama
+
+            response = await asyncio.to_thread(ollama.web_search, query, limit)
+        except Exception:
+            return None
+
+        results = []
+        for item in getattr(response, "results", None) or []:
+            results.append({
+                "title": getattr(item, "title", "") or "",
+                "url": getattr(item, "url", "") or "",
+                "snippet": (getattr(item, "content", "") or "")[:400],
+            })
+        if not results:
+            return None
+        return _render_results(query, results, "ollama")
 
     async def _custom_search(
         self, endpoint: str, api_key: str, query: str, limit: int, ctx: ToolContext
@@ -159,46 +199,102 @@ class WebSearchTool(Tool):
         )
 
     async def _duckduckgo(self, query: str, limit: int, ctx: ToolContext) -> ToolResult:
-        """No-API-key fallback via the DuckDuckGo HTML endpoint."""
-        url = "https://html.duckduckgo.com/html/?" + urlencode({"q": query})
-        try:
-            async with httpx.AsyncClient(
-                follow_redirects=True,
-                timeout=ctx.config.get("web.timeout_sec", 20),
-                headers={"User-Agent": USER_AGENT},
-            ) as client:
-                response = await client.get(url)
-                response.raise_for_status()
-        except httpx.HTTPError as exc:
-            return ToolResult.fail(
-                f"search failed: {exc}. Configure web.search_endpoint for a dedicated provider."
-            )
+        """Free, no-API-key search by scraping DuckDuckGo's HTML endpoints.
 
-        results: list[dict[str, str]] = []
-        pattern = re.compile(
-            r'<a[^>]+class="result__a"[^>]+href="([^"]+)"[^>]*>(.*?)</a>.*?'
-            r'class="result__snippet"[^>]*>(.*?)</a>',
-            re.S,
+        Two endpoints are tried because either can start returning a challenge
+        page; between them this is reliable enough to depend on.
+        """
+        timeout = float(ctx.config.get("web.timeout_sec", 20))
+        headers = {
+            "User-Agent": BROWSER_UA,
+            "Accept": "text/html,application/xhtml+xml",
+            "Accept-Language": "en-US,en;q=0.9",
+        }
+        errors: list[str] = []
+
+        for endpoint in ("https://html.duckduckgo.com/html/", "https://lite.duckduckgo.com/lite/"):
+            try:
+                async with httpx.AsyncClient(
+                    follow_redirects=True, timeout=timeout, headers=headers
+                ) as client:
+                    # POST avoids some of the bot checks the GET form trips
+                    response = await client.post(endpoint, data={"q": query})
+                    response.raise_for_status()
+            except httpx.HTTPError as exc:
+                errors.append(f"{endpoint}: {exc}")
+                continue
+
+            results = _parse_ddg(response.text, limit)
+            if results:
+                return _render_results(query, results, "duckduckgo")
+            errors.append(f"{endpoint}: no parseable results")
+
+        detail = "; ".join(errors)
+        return ToolResult.fail(
+            f"web search is unavailable right now ({detail}). "
+            "Set OLLAMA_API_KEY for Ollama's hosted search, or web.search_endpoint "
+            "for your own provider. You can still read a known URL with fetch_url."
         )
-        for match in pattern.finditer(response.text):
+
+
+def unwrap_ddg_url(url: str) -> str:
+    """DuckDuckGo wraps results in //duckduckgo.com/l/?uddg=<encoded>.
+
+    Left as-is those are unusable: no scheme, so fetch_url refuses them, and
+    they burn tokens. Pull the real destination back out.
+    """
+    url = html_module.unescape(url.strip())
+    if url.startswith("//"):
+        url = "https:" + url
+    if "duckduckgo.com/l/" in url and "uddg=" in url:
+        try:
+            target = parse_qs(urlparse(url).query).get("uddg", [None])[0]
+            if target:
+                return unquote(target)
+        except (ValueError, KeyError):
+            pass
+    return url
+
+
+_DDG_HTML = re.compile(
+    r'<a[^>]+class="result__a"[^>]+href="([^"]+)"[^>]*>(.*?)</a>.*?'
+    r'class="result__snippet"[^>]*>(.*?)</a>',
+    re.S,
+)
+_DDG_LITE = re.compile(
+    r'<a[^>]+class="result-link"[^>]+href="([^"]+)"[^>]*>(.*?)</a>.*?'
+    r'class="result-snippet"[^>]*>(.*?)</td>',
+    re.S,
+)
+
+
+def _parse_ddg(html: str, limit: int) -> list[dict[str, str]]:
+    results: list[dict[str, str]] = []
+    for pattern in (_DDG_HTML, _DDG_LITE):
+        for match in pattern.finditer(html):
             link, title, snippet = match.groups()
+            url = unwrap_ddg_url(link)
+            if not url.startswith("http"):
+                continue
             results.append({
-                "title": html_to_text(title),
-                "url": html_module.unescape(link),
-                "snippet": html_to_text(snippet)[:300],
+                "title": html_to_text(title).strip(),
+                "url": url,
+                "snippet": " ".join(html_to_text(snippet).split())[:350],
             })
             if len(results) >= limit:
-                break
+                return results
+        if results:
+            break
+    return results
 
-        if not results:
-            return ToolResult.succeed(
-                f"no results for {query!r}", headline=f"search: {query} (0)"
-            )
 
-        rendered = "\n\n".join(
-            f"{i}. {r['title']}\n   {r['url']}\n   {r['snippet']}"
-            for i, r in enumerate(results, 1)
-        )
-        return ToolResult.succeed(
-            f"Results for {query!r}:\n\n{rendered}", headline=f"search: {query} ({len(results)})"
-        )
+def _render_results(query: str, results: list[dict[str, str]], provider: str) -> ToolResult:
+    rendered = "\n\n".join(
+        f"{i}. {r['title']}\n   {r['url']}\n   {r['snippet']}"
+        for i, r in enumerate(results, 1)
+    )
+    return ToolResult.succeed(
+        f"Results for {query!r} (via {provider}). "
+        f"Use fetch_url on any of these to read the full page.\n\n{rendered}",
+        headline=f"search: {query} ({len(results)})",
+    )
